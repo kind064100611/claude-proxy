@@ -29,7 +29,7 @@ function fixture(t) {
     model.calls++;
     model.lastCall = call;
     if (model.fail) return null;
-    return { model: "gpt-test-luna", summary: "synthetic summary", highlights: [{ start: 2, end: 3, reason: "key lines" }] };
+    return { model: "gpt-test-luna", summary: model.summaryText || "synthetic summary", highlights: [{ start: 2, end: 3, reason: "key lines" }] };
   };
   const toggle = (enabled) => fs.writeFileSync(path.join(root, "gateway-features.json"), JSON.stringify({ version: 1, onlineSummary: enabled }));
   toggle(true);
@@ -52,7 +52,7 @@ test("feature toggle defaults on in user HOME, CLI preserves other fields, and r
   const modulePath = path.resolve(__dirname, "../lib/online-summary");
   const scriptPath = path.resolve(__dirname, "../scripts/toggle-online-summary.js");
   const read = () => JSON.parse(execFileSync(process.execPath, ["-e", `const p = require(${JSON.stringify(modulePath)}); console.log(JSON.stringify({file:p.getFeatureConfigPath(),status:p.createOnlineSummary().getStatus()}));`], { cwd: home, env, encoding: "utf8" }));
-  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null } });
+  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 16384 } });
   execFileSync(process.execPath, [scriptPath, "status"], { cwd: home, env });
   assert.equal(fs.existsSync(path.dirname(filename)), false);
   fs.mkdirSync(path.dirname(filename), { mode: 0o700 });
@@ -322,21 +322,23 @@ test("summary model selection persists, is validated and can return to automatic
   const { home, filename } = featureFixture(t);
   let models = ["claude-haiku-5.5", "gpt-6-luna"];
   const settings = createSummarySettings({ configFile: filename, getDefaultModel: async () => "gpt-6-luna", listModels: async () => models });
-  assert.deepEqual(await settings.getStatus(), { enabled: true, model: null, defaultModel: "gpt-6-luna", models });
+  const thresholds = [4096, 8192, 16384, 32768];
+  assert.deepEqual(await settings.getStatus(), { enabled: true, model: null, defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds });
   assert.equal(fs.existsSync(filename), false);
-  assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models });
-  await settings.configure({ onlineSummary: false });
-  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5" });
+  assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds });
+  await settings.configure({ onlineSummary: false, summaryThreshold: 8192 });
+  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192 });
+  await assert.rejects(settings.configure({ summaryThreshold: 1000 }), { code: "INVALID_SUMMARY_THRESHOLD" });
   await assert.rejects(settings.configure({ summaryModel: "not-listed" }), { code: "UNKNOWN_SUMMARY_MODEL" });
   assert.equal(getStatus(filename).summaryModel, "claude-haiku-5.5");
   models = [];
   assert.equal((await settings.getStatus()).model, "claude-haiku-5.5");
   await settings.configure({ summaryModel: null });
-  assert.deepEqual(JSON.parse(fs.readFileSync(filename, "utf8")), { version: 1, onlineSummary: false });
+  assert.deepEqual(JSON.parse(fs.readFileSync(filename, "utf8")), { version: 1, onlineSummary: false, summaryThreshold: 8192 });
   assert.throws(() => setFeatures({ onlineSummary: "yes" }, filename));
   assert.throws(() => setFeatures({ summaryModel: "bad model id" }, filename));
-  fs.writeFileSync(filename, JSON.stringify({ version: 1, summaryModel: "bad model id" }));
-  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null });
+  fs.writeFileSync(filename, JSON.stringify({ version: 1, summaryModel: "bad model id", summaryThreshold: 5000 }));
+  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 16384 });
   assert.equal(fs.existsSync(path.join(home, "other-cli-root")), false);
 });
 
@@ -349,6 +351,27 @@ test("configuration events report the enabled state and summary model choice", a
   pack.getStatus();
   setFeatures({ summaryModel: "claude-haiku-5.5" }, configFile);
   pack.getStatus();
-  assert.deepEqual(events, [{ event: "configuration", enabled: true, summary_model: "auto" },
-    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5" }]);
+  assert.deepEqual(events, [{ event: "configuration", enabled: true, summary_model: "auto", summary_threshold: 16384 },
+    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 16384 }]);
+});
+
+test("the configured threshold decides which outputs are summarized and weak compression keeps the original", async (t) => {
+  const { pack, root, model, warnings } = fixture(t);
+  const medium = "BEGIN\n" + "exact archived line\n".repeat(400) + "END\n";
+  const base = initial();
+  await pack.prepare(base);
+  const atDefault = await pack.prepare(addResult(base, "medium_default", medium));
+  assert.equal(atDefault.stats.summarized_results, 0);
+  assert.equal(model.calls, 0);
+  fs.writeFileSync(path.join(root, "gateway-features.json"), JSON.stringify({ version: 1, onlineSummary: true, summaryThreshold: 4096 }));
+  const lowered = await pack.prepare(addResult(base, "medium_lowered", medium));
+  assert.equal(lowered.stats.summarized_results, 1);
+  assert.ok(lastText(lowered.body).startsWith("[Gateway online summary"));
+  const short = "line\n".repeat(1000);
+  model.summaryText = "s".repeat(3600);
+  const weak = await pack.prepare(addResult(base, "weak", short));
+  assert.equal(model.calls, 2);
+  assert.equal(weak.stats.summarized_results, 0);
+  assert.equal(lastText(weak.body), short);
+  assert.deepEqual(warnings, []);
 });

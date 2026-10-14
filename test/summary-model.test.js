@@ -12,7 +12,7 @@ test("pickModels chooses the newest Luna and Haiku versions", () => {
 });
 
 test("numbered input matches Read line numbers and keeps head and tail of oversized output", () => {
-  assert.match(numberedInput("a\nb", { name: "Bash", input: { command: "make" } }), /Tool: Bash\nTool input: \{"command":"make"\}\nTotal lines: 2\n\n1: a\n2: b$/);
+  assert.match(numberedInput("a\nb", { name: "Bash", input: { command: "make" } }), /Tool: Bash\nTool input: \{"command":"make"\}\nTotal lines: 2\nKeep the summary under 300 characters.\n\n1: a\n2: b$/);
   const line = "x".repeat(1000);
   const input = numberedInput(Array(3000).fill(line).join("\n"), null);
   assert.ok(Buffer.byteLength(input) <= MAX_INPUT_BYTES + 2048);

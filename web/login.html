@@ -129,10 +129,13 @@
 
     <section class="card" aria-labelledby="online-summary-heading">
       <h2 id="online-summary-heading">Online Summary</h2>
-      <p>Large tool outputs (16 KiB or more, except Read) are summarized by a cheap model before they reach your main model: key facts plus verbatim key lines with line numbers. The full original stays on this computer for Read. Tool outputs are sent to the selected model's provider.</p>
+      <p>Tool outputs at or above the threshold below (except Read) are summarized by a cheap model before they reach your main model: key facts plus verbatim key lines with line numbers. The full original stays on this computer for Read. Tool outputs are sent to the selected model's provider.</p>
       <label class="toggle" for="online-summary-enabled"><input id="online-summary-enabled" type="checkbox" disabled> Enable Online Summary</label>
       <label for="online-summary-model">Summary model</label>
       <select id="online-summary-model" disabled></select>
+      <label for="online-summary-threshold">Summarize outputs of at least</label>
+      <select id="online-summary-threshold" disabled></select>
+      <p class="hint">Lower thresholds summarize more outputs and save more tokens, but each summary adds a few seconds.</p>
       <p id="online-summary-status" class="status" role="status" aria-live="polite">Loading Online Summary settings…</p>
     </section>
 
@@ -248,15 +251,25 @@
         return option;
       }));
       select.value = selected;
+      const thresholdSelect = document.getElementById("online-summary-threshold");
+      const thresholds = Array.isArray(settings.thresholds) ? settings.thresholds.filter((bytes) => Number.isSafeInteger(bytes) && bytes > 0) : [];
+      thresholdSelect.replaceChildren(...thresholds.map((bytes) => {
+        const option = document.createElement("option");
+        option.value = String(bytes);
+        option.textContent = `${bytes / 1024} KiB`;
+        return option;
+      }));
+      thresholdSelect.value = String(settings.threshold || "");
       toggle.checked = settings.enabled === true;
       toggle.disabled = onlineSummaryBusy || !available;
       select.disabled = onlineSummaryBusy || !available || !toggle.checked || !models.length;
+      thresholdSelect.disabled = onlineSummaryBusy || !available || !toggle.checked || !thresholds.length;
       if (onlineSummaryBusy) return;
       if (onlineSummaryMessage) setMessage(element, onlineSummaryMessage.text, onlineSummaryMessage.kind);
       else if (!available) setMessage(element, "Online Summary settings are unavailable.", "error");
       else if (!toggle.checked) setMessage(element, "Online Summary is off. Large tool outputs are sent unchanged.", "");
       else if (!selected) setMessage(element, "Online Summary is on, but no summary model is available yet. Log in to ChatGPT or Copilot.", "error");
-      else setMessage(element, `Online Summary is on. Summary model: ${selected}${settings.model ? "" : " (detected automatically)"}.`, "success");
+      else setMessage(element, `Online Summary is on. Summary model: ${selected}${settings.model ? "" : " (detected automatically)"}; threshold: ${settings.threshold / 1024} KiB.`, "success");
     }
     async function saveOnlineSummary(change) {
       if (onlineSummaryBusy) return;
@@ -437,6 +450,7 @@
         document.getElementById("project-memory-install").disabled = true;
         document.getElementById("online-summary-enabled").disabled = true;
         document.getElementById("online-summary-model").disabled = true;
+        document.getElementById("online-summary-threshold").disabled = true;
         if (!onlineSummaryMessage) setMessage(document.getElementById("online-summary-status"), "Unable to load Online Summary settings.", "error");
         if (!projectMemoryMessage) setMessage(document.getElementById("project-memory-status"), "Unable to load Project Code Memory status. Installation is disabled.", "error");
       }
@@ -585,6 +599,8 @@
       saveOnlineSummary({ enabled: document.getElementById("online-summary-enabled").checked }));
     document.getElementById("online-summary-model").addEventListener("change", () =>
       saveOnlineSummary({ model: document.getElementById("online-summary-model").value }));
+    document.getElementById("online-summary-threshold").addEventListener("change", () =>
+      saveOnlineSummary({ threshold: Number(document.getElementById("online-summary-threshold").value) }));
     document.getElementById("macos-service-configure").addEventListener("click", configureMacosService);
     document.getElementById("project-memory-install").addEventListener("click", installProjectMemory);
 

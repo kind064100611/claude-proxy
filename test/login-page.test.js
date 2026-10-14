@@ -312,7 +312,8 @@ test("configuration keeps busy state and presents fixed backend errors", async (
 });
 
 test("Online Summary toggle greys out the model select, defaults to the detected model and saves only the changed setting", async () => {
-  let settings = { available: true, enabled: false, model: null, defaultModel: "gpt-6-luna", models: ["claude-haiku-5.5", "gpt-6-luna"] };
+  let settings = { available: true, enabled: false, model: null, defaultModel: "gpt-6-luna", models: ["claude-haiku-5.5", "gpt-6-luna"],
+    threshold: 16384, thresholds: [4096, 8192, 16384, 32768] };
   const posts = [];
   const page = pageHarness(async () => [], { status: () => ({ onlineSummary: settings }),
     configure: async (url, options) => {
@@ -320,6 +321,7 @@ test("Online Summary toggle greys out the model select, defaults to the detected
       posts.push({ url, change });
       if ("enabled" in change) settings = { ...settings, enabled: change.enabled };
       if ("model" in change) settings = { ...settings, model: change.model };
+      if ("threshold" in change) settings = { ...settings, threshold: change.threshold };
       return { ok: true, json: async () => ({ success: true, onlineSummary: settings }) };
     } });
   await page.refresh();
@@ -327,8 +329,12 @@ test("Online Summary toggle greys out the model select, defaults to the detected
   const select = page.element("online-summary-model");
   assert.equal(toggle.checked, false);
   assert.equal(toggle.disabled, false);
+  const threshold = page.element("online-summary-threshold");
   assert.equal(select.disabled, true);
+  assert.equal(threshold.disabled, true);
   assert.equal(select.value, "gpt-6-luna");
+  assert.equal(threshold.value, "16384");
+  assert.deepEqual(threshold.children.map((option) => option.textContent), ["4 KiB", "8 KiB", "16 KiB", "32 KiB"]);
   assert.deepEqual(select.children.map((option) => option.textContent), ["claude-haiku-5.5", "gpt-6-luna (detected cheap model)"]);
   assert.match(page.element("online-summary-status").textContent, /off/);
 
@@ -339,6 +345,13 @@ test("Online Summary toggle greys out the model select, defaults to the detected
   assert.equal(select.value, "gpt-6-luna");
   assert.match(page.element("online-summary-status").textContent, /Saved.*without restarting/);
 
+  assert.equal(threshold.disabled, false);
+  threshold.value = "8192";
+  await threshold.listeners.change();
+  assert.deepEqual(posts.at(-1).change, { threshold: 8192 });
+  assert.equal(threshold.value, "8192");
+  assert.match(page.element("online-summary-status").textContent, /Saved/);
+
   select.value = "claude-haiku-5.5";
   await select.listeners.change();
   assert.deepEqual(posts.at(-1).change, { model: "claude-haiku-5.5" });
@@ -348,6 +361,7 @@ test("Online Summary toggle greys out the model select, defaults to the detected
   await toggle.listeners.change();
   assert.deepEqual(posts.at(-1).change, { enabled: false });
   assert.equal(select.disabled, true);
+  assert.equal(threshold.disabled, true);
   assert.equal(select.value, "claude-haiku-5.5");
 });
 

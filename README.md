@@ -291,7 +291,7 @@ Main endpoints:
 | `POST /api/auth/statusline/configure` | Protected independent Statusline deployment with an empty JSON object |
 | `POST /api/auth/macos/service/configure` | Protected macOS registration; 200 for a running no-op, 202 for a prepared asynchronous operation |
 | `POST /api/auth/project-memory/install` | Protected independent skill installation with an empty JSON object |
-| `POST /api/auth/online-summary/configure` | Protected Online Summary settings; accepts only `enabled` (boolean) and/or `model` (an ID from the list) |
+| `POST /api/auth/online-summary/configure` | Protected Online Summary settings; accepts only `enabled` (boolean), `model` (an ID from the list), and/or `threshold` (4096, 8192, 16384, or 32768) |
 
 Use `/login` for login and configuration operations; these endpoints do not support ordinary cross-origin API calls. The Messages endpoint is not a complete implementation of the Anthropic API. Do not assume other Anthropic endpoints are available.
 
@@ -330,23 +330,25 @@ Copilot's native usage fields, including `cache_read_input_tokens` and `cache_cr
 
 ## Online Summary
 
-Online Summary keeps large tool outputs from filling your main model's context. When a new tool output (other than `Read`) is 16 KiB or larger, the proxy archives the original locally and asks a cheap model to extract what matters: the outcome (exit status, pass/fail totals), every distinct error or warning with its message and `file:line`, and the line numbers of the key lines. Your main model receives the summary plus those key lines **quoted verbatim by the proxy** with their original line numbers, and the archive path. The cheap model only selects lines; it never rewrites the quoted text. Line numbers match `Read`, so the main model can read more with `Read(file_path, offset, limit)` when needed.
+Online Summary keeps large tool outputs from filling your main model's context. When a new tool output (other than `Read`) reaches the threshold (16 KiB by default), the proxy archives the original locally and asks a cheap model to extract what matters: the outcome (exit status, pass/fail totals), every distinct error or warning with its message and `file:line`, and the line numbers of the key lines. Your main model receives the summary plus those key lines **quoted verbatim by the proxy** with their original line numbers, and the archive path. The cheap model only selects lines; it never rewrites the quoted text. Line numbers match `Read`, so the main model can read more with `Read(file_path, offset, limit)` when needed.
+
+**Threshold.** Choose 4, 8, 16, or 32 KiB on `/login` (saved as `summaryThreshold`). Lower thresholds summarize more outputs and save more tokens, but each summary adds a few seconds. Summary length scales with the output size, and if a summary would not shrink the output below 70% of its original size, the original is kept.
 
 Up to 20 excerpts of up to 40 lines are included, without repeating overlapping lines, within half of the original size (4,000 to 12,000 characters). Excerpts that do not fit are listed by line range and reason so the main model can jump straight to them.
 
 **Summary model.** By default the proxy picks the newest Luna model (for example `gpt-6-luna`, which needs ChatGPT login or `OPENAI_API_KEY`) and falls back to the newest Haiku model (Copilot). The detection is cached until the proxy restarts. You can choose another GPT or Copilot Claude model on `/login`; a chosen model is tried first and falls back to Luna, then Haiku, if it fails. Each summary has a 30-second timeout. Outputs over 1 MiB are sent to the model as their first and last ~512 KiB with the omitted line range noted. If every model fails, the original output is kept.
 
-**Not summarized:** `Read` output (edits need exact text), error results, images or mixed content, archive readbacks, outputs under 16 KiB, history that existed before the first observed request, and requests without a session identity or a native `Read` tool.
+**Not summarized:** `Read` output (edits need exact text), error results, images or mixed content, archive readbacks, outputs below the threshold, history that existed before the first observed request, and requests without a session identity or a native `Read` tool.
 
 **Tool outputs are sent to the summary model's provider** (OpenAI or GitHub Copilot), which may differ from your main model's provider. Turn Online Summary off when outputs may contain sensitive data.
 
 ### Turning it on or off and choosing the model
 
-The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off, the model select is disabled while it is off, and the select defaults to the detected cheap model. Changes are saved immediately and apply to the next request without restarting the proxy. Both settings live under the actual HOME:
+The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off, the model and threshold selects are disabled while it is off, the model select defaults to the detected cheap model, and the threshold defaults to 16 KiB. Changes are saved immediately and apply to the next request without restarting the proxy. Both settings live under the actual HOME:
 
 ```text
 ~/.claude/gateway-features.json
-{"version": 1, "onlineSummary": true, "summaryModel": "claude-haiku-5.5"}
+{"version": 1, "onlineSummary": true, "summaryModel": "claude-haiku-5.5", "summaryThreshold": 8192}
 ```
 
 `onlineSummary` defaults to on when the file or field is absent; damaged or unsafe configuration disables new summaries. Remove `summaryModel` to return to automatic detection. The older `observationPack` field is no longer used, and the old beginning/ending excerpt mode has been removed. From the project root:
@@ -376,7 +378,7 @@ The limits are 8 MiB per result, 128 MiB of archives per session, and 4 MiB / 20
 
 **Archives contain the original tool output and may include sensitive code or data.** Do not share the archive directory. Archives are not cleaned up automatically; remove them only after the related sessions have ended. `CLAUDE_CONFIG_DIR` does not relocate the settings or archive paths.
 
-Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models used as `summary_models`), `Tool output summarized` (model, input bytes, duration), and `Summary model failed` (model, status, duration). They never contain tool output, raw session IDs, or credentials.
+Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`, plus `summary_threshold`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models used as `summary_models`), `Tool output summarized` (model, input bytes, duration), and `Summary model failed` (model, status, duration). They never contain tool output, raw session IDs, or credentials.
 
 ## Environment variables
 
@@ -408,7 +410,7 @@ A custom `OPENAI_BASE_URL` receives the API key, model requests, and conversatio
 
 - The listener is local-only. Messages API CORS compatibility is not authentication, and the API does not validate the placeholder key. Do not expose it through port forwarding, a reverse proxy, or a public tunnel, and do not publish the local page externally.
 - Login and configuration routes run before wildcard API CORS. They validate the loopback address, exact Host / port, and a random page nonce. POST requests also require a same-origin Origin and `application/json`. Protections include nonce-based CSP, `no-store`, framing restrictions, and redirect restrictions.
-- Authentication bodies are limited to 16 KiB with a 10-second read timeout. Configuration bodies must be `{}`, except Online Summary settings, which accept only `enabled` and `model`. The page does not persist tokens in browser storage or receive actual access tokens.
+- Authentication bodies are limited to 16 KiB with a 10-second read timeout. Configuration bodies must be `{}`, except Online Summary settings, which accept only `enabled`, `model`, and `threshold`. The page does not persist tokens in browser storage or receive actual access tokens.
 - Enter passwords only on official websites and keep device codes private. Do not share authentication files, private settings backups, or Online Summary archives.
 - Claude tools can still access local files or execute commands. Continue using client-side permission prompts and project isolation; the gateway does not replace permission controls.
 
