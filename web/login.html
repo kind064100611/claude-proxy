@@ -31,11 +31,15 @@
     button.secondary { background: #e9eef8; color: #1d2736; }
     button:disabled { opacity: .62; cursor: not-allowed; }
     button.busy:disabled { cursor: wait; }
-    button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px solid #f2a900; outline-offset: 3px; }
+    button:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid #f2a900; outline-offset: 3px; }
     .code { font-size: 1.35rem; font-weight: 750; letter-spacing: .08em; overflow-wrap: anywhere; }
     .flow { border-top: 1px solid #e4e8ef; padding-top: 12px; }
     .flow[hidden] { display: none; }
     label { display: block; font-weight: 650; margin: 12px 0 6px; }
+    .toggle { display: flex; align-items: center; gap: 10px; font-weight: 650; margin: 12px 0; }
+    .toggle input { width: 20px; height: 20px; margin: 0; }
+    select { width: 100%; min-height: 44px; border: 1px solid #aab5c6; border-radius: 8px; padding: 8px 12px; background: Canvas; color: CanvasText; font: inherit; }
+    select:disabled, .toggle input:disabled { opacity: .62; cursor: not-allowed; }
     textarea { width: 100%; min-height: 130px; resize: vertical; border: 1px solid #aab5c6; border-radius: 8px; padding: 12px; background: Canvas; color: CanvasText; font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
     .hint, .footnote { color: #526176; font-size: .92rem; }
     .summary { border-radius: 8px; background: #eef3fb; padding: 12px; overflow-wrap: anywhere; }
@@ -123,6 +127,15 @@
       <button id="statusline-configure" type="button" disabled>Configure Statusline</button>
     </section>
 
+    <section class="card" aria-labelledby="online-summary-heading">
+      <h2 id="online-summary-heading">Online Summary</h2>
+      <p>Large tool outputs (16 KiB or more, except Read) are summarized by a cheap model before they reach your main model: key facts plus verbatim key lines with line numbers. The full original stays on this computer for Read. Tool outputs are sent to the selected model's provider.</p>
+      <label class="toggle" for="online-summary-enabled"><input id="online-summary-enabled" type="checkbox" disabled> Enable Online Summary</label>
+      <label for="online-summary-model">Summary model</label>
+      <select id="online-summary-model" disabled></select>
+      <p id="online-summary-status" class="status" role="status" aria-live="polite">Loading Online Summary settings…</p>
+    </section>
+
     <p id="storage-path" class="summary" aria-live="polite">Credential directory: loading…</p>
     <p class="footnote">Local access only. Do not share device codes or API keys.</p>
   </main>
@@ -182,6 +195,7 @@
       renderSetupStatus("cli", status.claudeCli || {});
       renderSetupStatus("statusline", status.statusline || {});
       renderProjectMemory(status.projectMemory || {});
+      renderOnlineSummary(status.onlineSummary || {});
       renderMacosService(status.macosService || {});
       const service = status.macosService;
       if (service?.state === "pending" && service.operation?.id && !macosServiceBusy) followMacosOperation(service);
@@ -211,6 +225,53 @@
         projectMemoryMessage = { text: result.changed ? "Project Code Memory installed. Start a new Claude session to use it." : "Project Code Memory is already installed. Start a new Claude session to use it.", kind: "success" };
       } catch (error) { projectMemoryMessage = { text: error.message || "Project Code Memory installation failed.", kind: "error" }; }
       projectMemoryBusy = false; button.classList.remove("busy"); button.textContent = "Install Project Code Memory";
+      await refreshStatus();
+    }
+
+    let onlineSummaryBusy = false;
+    let onlineSummaryMessage = null;
+    let lastOnlineSummary = {};
+    // The select is disabled while the toggle is off; it defaults to the detected cheap model until the user saves a choice.
+    function renderOnlineSummary(settings) {
+      lastOnlineSummary = settings;
+      const toggle = document.getElementById("online-summary-enabled");
+      const select = document.getElementById("online-summary-model");
+      const element = document.getElementById("online-summary-status");
+      const available = settings.available === true;
+      const models = Array.isArray(settings.models) ? settings.models.filter((model) => typeof model === "string") : [];
+      const selected = settings.model || settings.defaultModel || "";
+      if (selected && !models.includes(selected)) models.unshift(selected);
+      select.replaceChildren(...models.map((model) => {
+        const option = document.createElement("option");
+        option.value = model;
+        option.textContent = model === settings.defaultModel ? `${model} (detected cheap model)` : model;
+        return option;
+      }));
+      select.value = selected;
+      toggle.checked = settings.enabled === true;
+      toggle.disabled = onlineSummaryBusy || !available;
+      select.disabled = onlineSummaryBusy || !available || !toggle.checked || !models.length;
+      if (onlineSummaryBusy) return;
+      if (onlineSummaryMessage) setMessage(element, onlineSummaryMessage.text, onlineSummaryMessage.kind);
+      else if (!available) setMessage(element, "Online Summary settings are unavailable.", "error");
+      else if (!toggle.checked) setMessage(element, "Online Summary is off. Large tool outputs are sent unchanged.", "");
+      else if (!selected) setMessage(element, "Online Summary is on, but no summary model is available yet. Log in to ChatGPT or Copilot.", "error");
+      else setMessage(element, `Online Summary is on. Summary model: ${selected}${settings.model ? "" : " (detected automatically)"}.`, "success");
+    }
+    async function saveOnlineSummary(change) {
+      if (onlineSummaryBusy) return;
+      onlineSummaryBusy = true;
+      onlineSummaryMessage = null;
+      renderOnlineSummary({ ...lastOnlineSummary, enabled: document.getElementById("online-summary-enabled").checked });
+      setMessage(document.getElementById("online-summary-status"), "Saving…");
+      try {
+        const result = await apiRequest("/api/auth/online-summary/configure", { method: "POST", body: JSON.stringify(change) });
+        if (result.success !== true) throw new Error("Online Summary settings were not saved.");
+        onlineSummaryMessage = { text: "Saved. Applies to new tool outputs without restarting the proxy.", kind: "success" };
+      } catch (error) {
+        onlineSummaryMessage = { text: error.message || "Online Summary settings could not be saved.", kind: "error" };
+      }
+      onlineSummaryBusy = false;
       await refreshStatus();
     }
 
@@ -374,6 +435,9 @@
         document.getElementById("macos-service-configure").disabled = true;
         setMessage(document.getElementById("macos-service-status"), "Unable to load macOS service status. Configuration is disabled.", "error");
         document.getElementById("project-memory-install").disabled = true;
+        document.getElementById("online-summary-enabled").disabled = true;
+        document.getElementById("online-summary-model").disabled = true;
+        if (!onlineSummaryMessage) setMessage(document.getElementById("online-summary-status"), "Unable to load Online Summary settings.", "error");
         if (!projectMemoryMessage) setMessage(document.getElementById("project-memory-status"), "Unable to load Project Code Memory status. Installation is disabled.", "error");
       }
     }
@@ -517,6 +581,10 @@
 
     document.getElementById("cli-configure").addEventListener("click", () => configureSetup("cli", "/api/auth/claude/configure"));
     document.getElementById("statusline-configure").addEventListener("click", () => configureSetup("statusline", "/api/auth/statusline/configure"));
+    document.getElementById("online-summary-enabled").addEventListener("change", () =>
+      saveOnlineSummary({ enabled: document.getElementById("online-summary-enabled").checked }));
+    document.getElementById("online-summary-model").addEventListener("change", () =>
+      saveOnlineSummary({ model: document.getElementById("online-summary-model").value }));
     document.getElementById("macos-service-configure").addEventListener("click", configureMacosService);
     document.getElementById("project-memory-install").addEventListener("click", installProjectMemory);
 

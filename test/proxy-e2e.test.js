@@ -55,7 +55,7 @@ for (const platform of ["mac", "windows"]) {
     const copilot = nativeRequire("../lib/github-copilot");
     const setup = nativeRequire("../lib/claude-setup");
     const auth = nativeRequire("../lib/auth-server");
-    const observations = nativeRequire("../lib/observation-pack");
+    const observations = nativeRequire("../lib/online-summary");
     const context = {
       require: (name) => {
         if (name === "http") return { createServer: (handler) => { server = http.createServer(handler); return server; } };
@@ -77,8 +77,10 @@ for (const platform of ["mac", "windows"]) {
         if (name === "../lib/auth-server") return { createAuthRouter: (options) => { router = auth.createAuthRouter(options); return router; } };
         if (name === "../lib/claude-setup") return { ...setup, getClaudeConfigRoot: () => configRoot,
           createClaudeSetup: (options) => setup.createClaudeSetup({ ...options, env: {}, configRoot, probe: async () => ({ cli: true, bash: "/bin/bash", jq: "test-jq", node: process.execPath }) }) };
-        if (name === "../lib/observation-pack") return { ...observations, createObservationPack: (options) => observations.createObservationPack({
-          ...options, configFile: path.join(root, "features.json"), archiveRoot: path.join(root, "observations") }) };
+        if (name === "../lib/online-summary") return { ...observations,
+          createOnlineSummary: (options) => observations.createOnlineSummary({
+            ...options, configFile: path.join(root, "features.json"), archiveRoot: path.join(root, "observations") }),
+          createSummarySettings: (options) => observations.createSummarySettings({ ...options, configFile: path.join(root, "features.json") }) };
         if (name === "../lib/openai-responses") return { ...responses, requestResponses: (body, options) => responses.requestResponses(body, {
           ...options, fetchImpl: openaiFetch, loadAuth: async () => ({ kind: "api", token: "mock-only" }) }) };
         if (name === "../lib/github-copilot") return { ...copilot, forwardClaudeRequest: (body, req, res, options) => copilot.forwardClaudeRequest(body, req, res, {

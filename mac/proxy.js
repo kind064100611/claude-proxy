@@ -6,20 +6,29 @@ const { isResponsesModel, getPromptCacheKey, getResponsesReasoning, requestRespo
 const { selectModel, toGatewayModels } = require("../lib/model-routing");
 const { createModelDiscovery } = require("../lib/model-discovery");
 const { isClaudeModel, forwardClaudeRequest } = require("../lib/github-copilot");
-const { createObservationPack, migrateFeatureConfig } = require("../lib/observation-pack");
+const { createOnlineSummary, createSummarySettings } = require("../lib/online-summary");
+const { createSummaryModel } = require("../lib/summary-model");
 const { defaultStore: credentialStore } = require("../lib/credential-store");
 const { createAuthRouter } = require("../lib/auth-server");
 const { createClaudeSetup, getClaudeConfigRoot } = require("../lib/claude-setup");
 const { createMacosService } = require("../lib/macos-service");
 const { createProjectMemoryInstaller } = require("../lib/project-memory-install");
-const observationPack = createObservationPack({
-  onWarning: (details) => logWarn("observation-pack", "Observation archive warning", details),
-  onEvent: (details) => logEvent("observation-pack", "Gateway observation pack configuration", details)
-});
 
 const PORT = 8082;
 const getAvailableModels = createModelDiscovery({
   onWarning: (provider, message) => console.warn(`Model catalog fallback (${provider}): ${message}`)
+});
+const summaryModel = createSummaryModel({
+  getAvailableModels,
+  // 页面选择的模型每次请求重新读取，修改无需重启代理。
+  getPreferredModel: () => onlineSummary.getStatus().summaryModel,
+  onEvent: (details) => logEvent("online-summary", "Tool output summarized", details),
+  onWarning: (details) => logWarn("online-summary", "Summary model failed", details)
+});
+const onlineSummary = createOnlineSummary({
+  summarize: summaryModel.summarize,
+  onWarning: (details) => logWarn("online-summary", "Online summary archive warning", details),
+  onEvent: (details) => logEvent("online-summary", "Online summary configuration", details)
 });
 const IMAGE_UNCONVERTIBLE_TEXT = "[image omitted: invalid or unsupported image source]";
 
@@ -864,6 +873,7 @@ const authRouter = createAuthRouter({
   projectMemory: createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() }),
   store: credentialStore,
   setup: createClaudeSetup({ store: credentialStore, getAvailableModels }),
+  summarySettings: createSummarySettings({ getDefaultModel: summaryModel.getDefaultModel, listModels: summaryModel.listModels }),
   onCredentialsChanged: () => getAvailableModels.invalidate()
 });
 
@@ -891,7 +901,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.url === "/features" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(observationPack.getStatus()));
+    res.end(JSON.stringify(onlineSummary.getStatus()));
     return;
   }
 
@@ -924,12 +934,12 @@ const server = http.createServer(async (req, res) => {
     req.on("end", async () => {
       if (bodyTooLarge) return;
       try {
-        const prepared = observationPack.prepare(JSON.parse(body), {
+        const prepared = await onlineSummary.prepare(JSON.parse(body), {
           readOnly: new URL(req.url, "http://localhost").pathname !== "/v1/messages"
         });
         const anthropicBody = prepared.body;
-        if (prepared.stats.packed_results) {
-          logEvent(requestId, "Gateway observation pack", prepared.stats);
+        if (prepared.stats.packed_results || prepared.stats.recalled_results) {
+          logEvent(requestId, "Gateway online summary", prepared.stats);
         }
         const isStream = anthropicBody.stream || false;
         const requestedModel = anthropicBody.model;
@@ -1017,8 +1027,6 @@ server.on("error", () => {
 });
 process.once("SIGTERM", shutdownProxy);
 process.once("SIGINT", shutdownProxy);
-const featureMigration = migrateFeatureConfig();
-if (featureMigration.warning) console.warn(featureMigration.warning);
 credentialStore.migrate({ onWarning: (message) => console.warn(message) });
 getAvailableModels().catch((error) => console.warn(`Model discovery failed: ${error.message}`));
 

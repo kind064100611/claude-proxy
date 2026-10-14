@@ -11,11 +11,12 @@ function pageHarness(_unused, { status, configure, requestImpl, fastWait = false
     if (!elements.has(id)) elements.set(id, {
       value: "", textContent: "", dataset: {}, hidden: true, disabled: ["cli-configure", "statusline-configure", "macos-service-configure", "project-memory-install"].includes(id), attributes: {}, listeners: {}, classList: { add() {}, remove() {} },
       setAttribute(name, value) { this.attributes[name] = value; },
-      addEventListener(name, handler) { this.listeners[name] = handler; }
+      addEventListener(name, handler) { this.listeners[name] = handler; },
+      replaceChildren(...children) { this.children = children; }
     });
     return elements.get(id);
   };
-  const document = { hidden: false, listeners: {}, getElementById: element,
+  const document = { hidden: false, listeners: {}, getElementById: element, createElement: () => ({ value: "", textContent: "" }),
     querySelector: () => ({ content: "test-page-nonce" }),
     addEventListener(name, handler) { this.listeners[name] = handler; }
   };
@@ -308,4 +309,57 @@ test("configuration keeps busy state and presents fixed backend errors", async (
   await cli;
   assert.match(page.element("cli-status").textContent, /apiKeyHelper/);
   assert.equal(page.element("cli-configure").dataset.busy, "false");
+});
+
+test("Online Summary toggle greys out the model select, defaults to the detected model and saves only the changed setting", async () => {
+  let settings = { available: true, enabled: false, model: null, defaultModel: "gpt-6-luna", models: ["claude-haiku-5.5", "gpt-6-luna"] };
+  const posts = [];
+  const page = pageHarness(async () => [], { status: () => ({ onlineSummary: settings }),
+    configure: async (url, options) => {
+      const change = JSON.parse(options.body);
+      posts.push({ url, change });
+      if ("enabled" in change) settings = { ...settings, enabled: change.enabled };
+      if ("model" in change) settings = { ...settings, model: change.model };
+      return { ok: true, json: async () => ({ success: true, onlineSummary: settings }) };
+    } });
+  await page.refresh();
+  const toggle = page.element("online-summary-enabled");
+  const select = page.element("online-summary-model");
+  assert.equal(toggle.checked, false);
+  assert.equal(toggle.disabled, false);
+  assert.equal(select.disabled, true);
+  assert.equal(select.value, "gpt-6-luna");
+  assert.deepEqual(select.children.map((option) => option.textContent), ["claude-haiku-5.5", "gpt-6-luna (detected cheap model)"]);
+  assert.match(page.element("online-summary-status").textContent, /off/);
+
+  toggle.checked = true;
+  await toggle.listeners.change();
+  assert.deepEqual(posts.at(-1), { url: "http://localhost:8082/api/auth/online-summary/configure", change: { enabled: true } });
+  assert.equal(select.disabled, false);
+  assert.equal(select.value, "gpt-6-luna");
+  assert.match(page.element("online-summary-status").textContent, /Saved.*without restarting/);
+
+  select.value = "claude-haiku-5.5";
+  await select.listeners.change();
+  assert.deepEqual(posts.at(-1).change, { model: "claude-haiku-5.5" });
+  assert.equal(select.value, "claude-haiku-5.5");
+
+  toggle.checked = false;
+  await toggle.listeners.change();
+  assert.deepEqual(posts.at(-1).change, { enabled: false });
+  assert.equal(select.disabled, true);
+  assert.equal(select.value, "claude-haiku-5.5");
+});
+
+test("Online Summary shows save failures and keeps controls disabled when settings are unavailable", async () => {
+  const page = pageHarness(async () => [], { status: () => ({ onlineSummary: { available: true, enabled: true, model: null, defaultModel: "gpt-6-luna", models: ["gpt-6-luna"] } }),
+    configure: async () => ({ ok: false, status: 400, json: async () => ({ error: "Choose a model from the list." }) }) });
+  await page.refresh();
+  await page.element("online-summary-model").listeners.change();
+  assert.match(page.element("online-summary-status").textContent, /Choose a model from the list/);
+  const unavailable = pageHarness(async () => [], { status: () => ({}) });
+  await unavailable.refresh();
+  assert.equal(unavailable.element("online-summary-enabled").disabled, true);
+  assert.equal(unavailable.element("online-summary-model").disabled, true);
+  assert.match(unavailable.element("online-summary-status").textContent, /unavailable/);
 });

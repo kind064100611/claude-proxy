@@ -210,14 +210,14 @@ test("Project Code Memory installs independently of damaged settings and absent 
 });
 
 test("Project Code Memory fixed errors and unavailable status do not leak raw data", async (t) => {
-  for (const code of ["PROJECT_MEMORY_BUSY", "PROJECT_MEMORY_UNAVAILABLE", "EIO"]) {
+  for (const code of ["PROJECT_MEMORY_CONFLICT", "PROJECT_MEMORY_UNAVAILABLE", "EIO"]) {
     const { api } = await fixture(t, { projectMemory: { getStatus: async () => ({ state: "secret_code", ready: true, installed: true, reason: "private reason" }),
       install: async () => { throw Object.assign(new Error("private output"), { code }); } } });
     const status = JSON.parse((await api("/api/auth/status")).text).projectMemory;
     assert.equal(status.state, "unavailable"); assert.equal(status.ready, false);
     assert.ok(!JSON.stringify(status).includes("private"));
     const result = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
-    assert.equal(result.status, code === "PROJECT_MEMORY_BUSY" ? 409 : 503);
+    assert.equal(result.status, code === "PROJECT_MEMORY_CONFLICT" ? 409 : 503);
     assert.ok(!result.text.includes("private"));
   }
 });

@@ -1,6 +1,6 @@
 # claude-proxy
 
-A local gateway for Claude Code. Access GPT through ChatGPT / Codex device authorization or an OpenAI API key, and access Claude through GitHub Copilot device authorization. Includes dynamic model discovery, a local login page, protected Claude CLI routing and Statusline setup, optional current-user macOS service registration, guarded Project Code Memory skill installation, tool and image conversion, streaming responses, Observation Pack, and comprehensive cache compatibility.
+A local gateway for Claude Code. Access GPT through ChatGPT / Codex device authorization or an OpenAI API key, and access Claude through GitHub Copilot device authorization. Includes dynamic model discovery, a local login page, protected Claude CLI routing and Statusline setup, optional current-user macOS service registration, guarded Project Code Memory skill installation, tool and image conversion, streaming responses, Online Summary of large tool outputs, and comprehensive cache compatibility.
 
 ## Contents
 
@@ -15,7 +15,7 @@ A local gateway for Claude Code. Access GPT through ChatGPT / Codex device autho
 - [Model selection and API](#model-selection-and-api)
 - [Streaming, tools, images, and reasoning](#streaming-tools-images-and-reasoning)
 - [Cache behavior](#cache-behavior)
-- [Observation Pack](#observation-pack)
+- [Online Summary](#online-summary)
 - [Environment variables](#environment-variables)
 - [Security and troubleshooting](#security-and-troubleshooting)
 - [Offline tests](#offline-tests)
@@ -40,8 +40,8 @@ Claude Code / Anthropic Messages client
 - GPT requests are converted to the Responses API, and responses are converted back to Anthropic Messages / SSE.
 - Claude requests use Copilot's native Messages endpoint, preserving thinking, signatures, tool events, and cache usage.
 - `/v1/models` merges the two dynamic catalogs available to the current credentials. There is no bundled static account model list.
-- `/login` manages local device authorization, CLI routing, Statusline setup, optional macOS service registration, and Project Code Memory installation. It does not collect account passwords.
-- The proxy uses CommonJS and Node.js built-in modules. The bundled MIT Claude HUD runtime is ESM; there is no build step or npm runtime dependency.
+- `/login` manages local device authorization, CLI routing, Statusline setup, Online Summary settings, optional macOS service registration, and Project Code Memory installation. It does not collect account passwords.
+- The proxy uses CommonJS and Node.js built-in modules; there is no build step or npm runtime dependency.
 
 Source layout: `lib/` contains provider, login, secure storage, setup, and cache modules; `web/login.html` is the local page; `mac/` and `windows/` contain platform proxies and launchers; `scripts/` contains feature-toggle utilities; and `test/` contains offline tests. The two `proxy.js` files are identical.
 
@@ -190,19 +190,19 @@ Conflicts such as `apiKeyHelper`, `proxyAuthHelper`, forced login settings, othe
 
 ## Configuring Statusline
 
-**Configure Statusline** on `/login` is independent of ChatGPT / Copilot login and CLI routing. It requires a discoverable Claude CLI, **Bash 3+**, **jq 1.6+**, and **Node.js 18+**. On Windows, install Git Bash and jq manually. Missing dependencies are never downloaded automatically.
+**Configure Statusline** on `/login` is independent of ChatGPT / Copilot login and CLI routing. It requires a discoverable Claude CLI, **Bash 3+**, and **jq 1.6+**; Node.js is not needed by the statusline. On Windows, install Git Bash and jq manually. Missing dependencies are never downloaded automatically.
 
-Clicking the button explicitly **replaces the existing `statusLine` command**. The original settings bytes are backed up to the same private `settings-backups/` directory described above. Gateway environment variables, authentication, hooks, permissions, and unrelated plugins remain unchanged. The operation accepts only an empty JSON object at `POST /api/auth/statusline/configure` under the local page's security guards.
+Clicking the button explicitly **replaces the existing `statusLine` command**, even if you already have one. The original settings bytes are backed up to the same private `settings-backups/` directory described above. Gateway environment variables, authentication, hooks, permissions, and unrelated plugins remain unchanged. The operation accepts only an empty JSON object at `POST /api/auth/statusline/configure` under the local page's security guards.
 
-The bundled MIT Claude HUD runtime and cache display are deployed into:
+The statusline is a single Bash/jq line: directory, git branch with a dirty marker, model name, current context usage (`ctx: used/total (pct%)`), whole-session `in/out/cache` tokens with the prompt-cache hit rate, and the cache state (`warm`, `cold`, or `dropped: <cause>`). `in` counts all input, including the cached system prompt. It is deployed into:
 
 ```text
 <actual CLI config directory>/claude-proxy/statusline/<generation SHA-256>/
 ```
 
-Each immutable generation includes the complete HUD runtime, its own display config/cache directory, the adapted wrapper, and a launcher that quotes the probed Node/Bash/jq paths. Dependency paths participate in the generation identity. Repeated installs verify deployed runtime bytes before reuse; changed or unsafe generations are not silently overwritten. Settings are committed only after successful deployment. If saving fails, cleanup removes only a newly created deployment that is not referenced by the latest settings; reused generations remain intact.
+Each immutable generation contains the script and a launcher that quotes the probed Bash/jq paths. Dependency paths participate in the generation identity. Repeated installs verify the deployed script bytes before reuse; changed or unsafe generations are not silently overwritten, and older Claude HUD generations show as not configured until you click the button again. Settings are committed only after successful deployment. If saving fails, cleanup removes only a newly created deployment that is not referenced by the latest settings.
 
-The deployed Statusline works independently after moving this repository, provided the selected executables remain available. Its HUD config/cache is isolated without hiding the actual Claude CLI config root. It displays warm/dropped/hit cache information from statusline input; upstream cache availability is not guaranteed. Refresh the Statusline or open a new Claude session after configuring. See [Statusline provenance](statusline/SOURCE.md) and [HUD MIT license](statusline/claude-hud/LICENSE). The personal non-runtime wrapper archive is not included.
+The deployed Statusline works after moving this repository, provided Bash and jq remain available. Refresh the Statusline or open a new Claude session after configuring. See [Statusline provenance](statusline/SOURCE.md).
 
 ## Registering a macOS service
 
@@ -240,9 +240,9 @@ Installation is an explicit, local nonce-protected `{}` `POST /api/auth/project-
   SOURCE.md
 ```
 
-The actual CLI root defaults to `~/.claude` and follows `CLAUDE_CONFIG_DIR`. The installer uses a serialized per-root queue, an exclusive `.project-code-memory-install.lock`, and private `.project-code-memory-stage-*` staging under `<actual CLI config directory>/claude-proxy/`. It creates the target exclusively and publishes `SKILL.md` last through an atomic, no-overwrite hard link. It never steals a lock on timeout; abandoned locks require manual inspection. On failure, cleanup removes only unchanged files/inodes and empty directories created by that attempt, retaining external edits and extras.
+The actual CLI root defaults to `~/.claude` and follows `CLAUDE_CONFIG_DIR`. Installs are serialized in the proxy process. All files are first written to a private `.project-code-memory-stage-*` directory under `<actual CLI config directory>/claude-proxy/`, then published with a single directory rename, so Claude never sees a half-installed skill. On failure only that staging directory is removed; if the target appears meanwhile, it is kept and reported as a conflict. Copying `project-code-memory/` into the skills directory manually also works and is detected as installed.
 
-An identical complete deployed skill or matching pinned upstream core is a **read-only no-op**, preserving existing `.git`, caches, extras, and directory permissions. Different, partial, symlinked, or unsafe installations are refused rather than replaced. The installer does not execute `pcm.py`, create project caches, edit `.gitignore`, settings, hooks, or CLAUDE.md, or download code. Import, startup, status, and page load never install anything. Damaged CLI settings and absent proxy credentials do not block this independent feature.
+An identical complete deployed skill or matching pinned upstream core is a **read-only no-op**, preserving existing `.git`, caches, extras, and directory permissions. Different or partial installations are refused rather than replaced. The installer does not execute `pcm.py`, create project caches, edit `.gitignore`, settings, hooks, or CLAUDE.md, or download code. Import, startup, status, and page load never install anything. Damaged CLI settings and absent proxy credentials do not block this independent feature.
 
 **Open a new Claude session after installation.** Invoke `/project-code-memory` explicitly or allow the model to select it. This is model-driven guidance, not a hook. A later `query` intentionally creates the selected project's `projectCodeMemory/` cache, adds its ignore rule, and may prune stale records. Installing the skill does not perform that query. See the [bundled README](project-code-memory/README.md), [provenance](project-code-memory/SOURCE.md), and [MIT license](project-code-memory/LICENSE). The upstream Python implementation, reference, optional Codex agent metadata, and upstream tests are retained in the repository; only the five files above are installed.
 
@@ -281,9 +281,9 @@ Main endpoints:
 | `GET /health` | Process liveness; does not validate upstream access |
 | `GET /v1/models` | Dynamic gateway catalog from both providers; accepts requests with query parameters |
 | `POST /v1/messages` | Anthropic Messages input with JSON or SSE output |
-| `GET /features` | Read-only Observation Pack status |
+| `GET /features` | Read-only Online Summary status (`onlineSummary`, `summaryModel`) |
 | `GET /login` | Local account and CLI configuration page |
-| `GET /api/auth/status` | Nonce-protected credential / CLI / Statusline / service / Project Code Memory status; never returns tokens |
+| `GET /api/auth/status` | Nonce-protected credential / CLI / Statusline / Online Summary / service / Project Code Memory status; never returns tokens |
 | `POST /api/auth/chatgpt/start` | Starts ChatGPT device authorization; the page sends `{}` |
 | `POST /api/auth/copilot/start` | Starts Copilot device authorization; the page sends `{}` |
 | `GET /api/auth/flow/<id>` | Device-flow status snapshot |
@@ -291,6 +291,7 @@ Main endpoints:
 | `POST /api/auth/statusline/configure` | Protected independent Statusline deployment with an empty JSON object |
 | `POST /api/auth/macos/service/configure` | Protected macOS registration; 200 for a running no-op, 202 for a prepared asynchronous operation |
 | `POST /api/auth/project-memory/install` | Protected independent skill installation with an empty JSON object |
+| `POST /api/auth/online-summary/configure` | Protected Online Summary settings; accepts only `enabled` (boolean) and/or `model` (an ID from the list) |
 
 Use `/login` for login and configuration operations; these endpoints do not support ordinary cross-origin API calls. The Messages endpoint is not a complete implementation of the Anthropic API. Do not assume other Anthropic endpoints are available.
 
@@ -325,30 +326,43 @@ Copilot's native usage fields, including `cache_read_input_tokens` and `cache_cr
 - Replay is limited to 512 entries / 16 MiB with least-recently-used eviction. Restarting clears it, and unrelated clients are not arbitrarily mixed.
 - Model discovery coalesces pending requests, limits each source to 12 seconds, and gives clients a response budget of approximately 2.2 seconds. The TTL is five minutes when every source succeeds and 30 seconds when a source fails. A failed source retains previously discovered entries; a source that has never succeeded remains absent.
 - Successful login invalidates the catalog generation. An older pending discovery cannot repopulate the current cache.
-- CLI model settings are cached by mtime. This is separate from upstream prompt caching, Responses replay, and Observation Pack.
+- CLI model settings are cached by mtime. This is separate from upstream prompt caching, Responses replay, and Online Summary.
 
-## Observation Pack
+## Online Summary
 
-Observation Pack archives new large text tool results on later turns and replaces the full content with a notice containing its SHA-256, original file path, and beginning / ending excerpts. These are **excerpts, not summaries**. Clients can retrieve the complete evidence through native `Read` using `file_path`, `offset`, and `limit`; they must not infer missing content from excerpts.
+Online Summary keeps large tool outputs from filling your main model's context. When a new tool output (other than `Read`) is 16 KiB or larger, the proxy archives the original locally and asks a cheap model to extract what matters: the outcome (exit status, pass/fail totals), every distinct error or warning with its message and `file:line`, and the line numbers of the key lines. Your main model receives the summary plus those key lines **quoted verbatim by the proxy** with their original line numbers, and the archive path. The cheap model only selects lines; it never rewrites the quoted text. Line numbers match `Read`, so the main model can read more with `Read(file_path, offset, limit)` when needed.
 
-It is enabled by default. The toggle always lives under the actual HOME:
+Up to 20 excerpts of up to 40 lines are included, without repeating overlapping lines, within half of the original size (4,000 to 12,000 characters). Excerpts that do not fit are listed by line range and reason so the main model can jump straight to them.
+
+**Summary model.** By default the proxy picks the newest Luna model (for example `gpt-6-luna`, which needs ChatGPT login or `OPENAI_API_KEY`) and falls back to the newest Haiku model (Copilot). The detection is cached until the proxy restarts. You can choose another GPT or Copilot Claude model on `/login`; a chosen model is tried first and falls back to Luna, then Haiku, if it fails. Each summary has a 30-second timeout. Outputs over 1 MiB are sent to the model as their first and last ~512 KiB with the omitted line range noted. If every model fails, the original output is kept.
+
+**Not summarized:** `Read` output (edits need exact text), error results, images or mixed content, archive readbacks, outputs under 16 KiB, history that existed before the first observed request, and requests without a session identity or a native `Read` tool.
+
+**Tool outputs are sent to the summary model's provider** (OpenAI or GitHub Copilot), which may differ from your main model's provider. Turn Online Summary off when outputs may contain sensitive data.
+
+### Turning it on or off and choosing the model
+
+The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off, the model select is disabled while it is off, and the select defaults to the detected cheap model. Changes are saved immediately and apply to the next request without restarting the proxy. Both settings live under the actual HOME:
 
 ```text
 ~/.claude/gateway-features.json
+{"version": 1, "onlineSummary": true, "summaryModel": "claude-haiku-5.5"}
 ```
 
-If this file is absent at startup, the proxy safely imports valid original bytes from the project-root `gateway-features.json`, retaining the project file. Existing user configuration takes precedence. A missing toggle defaults to enabled; damaged or unsafe configuration disables new packing.
-
-From the project root:
+`onlineSummary` defaults to on when the file or field is absent; damaged or unsafe configuration disables new summaries. Remove `summaryModel` to return to automatic detection. The older `observationPack` field is no longer used, and the old beginning/ending excerpt mode has been removed. From the project root:
 
 ```bash
-node scripts/toggle-observation-pack.js status
-node scripts/toggle-observation-pack.js off
-node scripts/toggle-observation-pack.js on
+node scripts/toggle-online-summary.js status
+node scripts/toggle-online-summary.js off
+node scripts/toggle-online-summary.js on
 curl http://127.0.0.1:8082/features
 ```
 
-`on` / `off` explicitly write the toggle. `status` and `GET /features` are read-only. The setting reloads per request without a restart. Previously sent history keeps its pinned projection: turning packing off affects new results only and does not restore or rewrite earlier history.
+The script changes only `onlineSummary` and keeps other fields. `status` and `GET /features` are read-only.
+
+### Cache and safety
+
+Each result is decided once, the first time it appears in the newest turn: summary or original. The decision is stored in a local ledger and never changes, so retries, proxy restarts, model switches, and toggle changes do not rewrite history already sent, and prompt caching is not broken. Turning the feature off affects only new results; excerpts produced by the older Observation Pack also stay as they were. Token-count requests read existing views only and never call the summary model.
 
 Archives always live at:
 
@@ -358,11 +372,11 @@ Archives always live at:
   <content SHA-256>.txt
 ```
 
-The client must supply `metadata.session_id` or `metadata.user_id` and a `Read` tool with a `file_path` parameter. Results are not packed without a reliable session identity. The first observed request establishes a baseline; only eligible new results on later requests are packed. The threshold is 16 KiB, with limits of 8 MiB per result, 128 MiB of archives per session, and 4 MiB / 20,000 entries for state.
+The limits are 8 MiB per result, 128 MiB of archives per session, and 4 MiB / 20,000 entries for state. Archives and state use private files. An interrupted write freezes new summaries for that session. Unreadable existing state returns 503 rather than rewriting untrusted history.
 
-Only recoverable plain-text tool results are processed. Images, error results, archive readbacks, and history already pinned as full text are not packed. Archives and state use private files. An interrupted write freezes new packing for that session. Unreadable existing state returns 503 rather than rewriting untrusted history.
+**Archives contain the original tool output and may include sensitive code or data.** Do not share the archive directory. Archives are not cleaned up automatically; remove them only after the related sessions have ended. `CLAUDE_CONFIG_DIR` does not relocate the settings or archive paths.
 
-**Archives contain the original tool output and may include sensitive code or data.** Do not share the entire archive directory. Archives are not cleaned up automatically; remove them manually only after confirming the session no longer needs its history or readbacks. Observation Pack is not an upstream cache and does not guarantee equivalent billing savings. `CLAUDE_CONFIG_DIR` does not relocate the toggle or archive paths.
+Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models used as `summary_models`), `Tool output summarized` (model, input bytes, duration), and `Summary model failed` (model, status, duration). They never contain tool output, raw session IDs, or credentials.
 
 ## Environment variables
 
@@ -394,8 +408,8 @@ A custom `OPENAI_BASE_URL` receives the API key, model requests, and conversatio
 
 - The listener is local-only. Messages API CORS compatibility is not authentication, and the API does not validate the placeholder key. Do not expose it through port forwarding, a reverse proxy, or a public tunnel, and do not publish the local page externally.
 - Login and configuration routes run before wildcard API CORS. They validate the loopback address, exact Host / port, and a random page nonce. POST requests also require a same-origin Origin and `application/json`. Protections include nonce-based CSP, `no-store`, framing restrictions, and redirect restrictions.
-- Authentication bodies are limited to 16 KiB with a 10-second read timeout. Configuration bodies must be `{}`. The page does not persist tokens in browser storage or receive actual access tokens.
-- Enter passwords only on official websites and keep device codes private. Do not share authentication files, private settings backups, or original observation archives.
+- Authentication bodies are limited to 16 KiB with a 10-second read timeout. Configuration bodies must be `{}`, except Online Summary settings, which accept only `enabled` and `model`. The page does not persist tokens in browser storage or receive actual access tokens.
+- Enter passwords only on official websites and keep device codes private. Do not share authentication files, private settings backups, or Online Summary archives.
 - Claude tools can still access local files or execute commands. Continue using client-side permission prompts and project isolation; the gateway does not replace permission controls.
 
 ### Common issues
@@ -410,8 +424,8 @@ A custom `OPENAI_BASE_URL` receives the API key, model requests, and conversatio
 | Copilot 403 / no Claude models | Check the Copilot subscription, organization authorization, model picker, and policies; confirm the account can access the model |
 | `/v1/models` is temporarily empty | Initial discovery may exceed the response budget; retry later. Missing credentials, upstream outages, or unavailable permissions do not produce a fabricated default model |
 | CLI configuration button is unavailable | Ensure Claude CLI is discoverable, matching credentials exist, settings are valid and writable, and authentication conflicts have been resolved manually |
-| Statusline button is unavailable / deployment fails | Check CLI, Bash 3+, jq 1.6+, Node 18+, the bundled runtime, settings permissions, and private deployment integrity; login is not required |
-| Project Code Memory button is unavailable / conflict | Check Claude CLI, CPython 3.9+, bundle integrity, safe skill/private directories, and installation lock; different or incomplete installations need manual handling |
+| Statusline button is unavailable / deployment fails | Check CLI, Bash 3+, jq 1.6+, the bundled script, settings permissions, and private deployment integrity; login is not required. A proxy started before an upgrade must be restarted |
+| Project Code Memory button is unavailable / conflict | Check Claude CLI, CPython 3.9+, bundle integrity, and the skills directory; different or incomplete installations need manual handling |
 | Service registration is unavailable | Confirm macOS GUI login, safe writable paths, matching label/installation, and supported environment/TLS options; no system service is created |
 | Service request disconnects / result is unknown | Let the page reconnect and verify its operation; do not repeat a lost POST blindly. Inspect private logs and status |
 | Service reports recovery_failed / fails after paths move | Start `bash mac/start-proxy.sh` manually, inspect the matching LaunchAgent and private logs, and repair paths without overwriting another installation |
@@ -420,7 +434,8 @@ A custom `OPENAI_BASE_URL` receives the API key, model requests, and conversatio
 | 429 / quota error | Wait according to upstream limits or adjust the account / model, and inspect upstream usage and quota |
 | Streaming fails midway / empty content | Inspect status and SSE errors; check the network, upstream terminal events, model permissions, and timeouts |
 | Cache hit is 0 | Caching is controlled upstream; check key / session identity, system / tools stability, and switches. Replay hits are not the same as billable prompt-cache hits |
-| Observation state is unreadable | Check archive integrity and permissions, restore trusted state, or start a new session. Do not delete the ledger during an active session |
+| Online Summary state is unreadable | Check archive integrity and permissions, restore trusted state, or start a new session. Do not delete the ledger during an active session |
+| Online Summary does not summarize | Check `Summary model failed` in the proxy's stderr log, the selected model on `/login`, and ChatGPT / Copilot login. `recalled_results` in `Gateway online summary` shows how often the main model re-read archives |
 
 ## Offline tests
 
@@ -447,12 +462,12 @@ HOME="$TEST_HOME" CLAUDE_CONFIG_DIR="$TEST_HOME/config" \
 
 In Windows PowerShell, create a separate temporary directory and set `HOME`, `USERPROFILE`, and `CLAUDE_CONFIG_DIR` for that test run, restoring the original environment afterward. `node --check` also works on Windows; `bash -n` / `cmp` require Git Bash or equivalent tools.
 
-The default suite uses mocked upstreams and temporary directories. It covers device authorization, token-refresh races, catalog invalidation, JSON / SSE, tools / images, cache usage, Responses replay, genuine client disconnects, login-route security, and private settings backups. HTTP end-to-end tests exercise both GPT and Copilot paths and reject unknown models. Statusline tests deploy/run only in temporary roots with synthetic input. Service tests mock system-management commands and run fake proxies on random non-8082 ports; VM/e2e tests inject a fake service. Project Code Memory tests use temporary CLI roots and fake dependency probes, covering no-op preservation, conflicts, concurrent publication, short writes, and external-edit cleanup. No real Statusline configuration, global skill installation, or launchd registration/restart is performed.
+The default suite uses mocked upstreams and temporary directories. It covers device authorization, token-refresh races, catalog invalidation, JSON / SSE, tools / images, cache usage, Responses replay, genuine client disconnects, login-route security, and private settings backups. HTTP end-to-end tests exercise both GPT and Copilot paths and reject unknown models. Statusline tests deploy/run only in temporary roots with synthetic input. Service tests mock system-management commands and run fake proxies on random non-8082 ports; VM/e2e tests inject a fake service. Project Code Memory tests use temporary CLI roots and fake dependency probes, covering no-op preservation, conflicts, concurrent installs, and failed-write cleanup. Online Summary tests use temporary settings/archive roots and fake summary models. No real Statusline configuration, global skill installation, or launchd registration/restart is performed.
 
-`claude-cli.test.js` and `observation-pack-cli.test.js` are skipped by default. Set `RUN_CLAUDE_CLI_TESTS=1` only when explicitly choosing to run isolated checks with the locally installed CLI. They still use mocked gateways and do not validate real account authorization or real upstream access.
+`claude-cli.test.js` is skipped by default. Set `RUN_CLAUDE_CLI_TESTS=1` only when explicitly choosing to run isolated checks with the locally installed CLI. It still uses mocked gateways and does not validate real account authorization or real upstream access.
 
 Validation is based on offline tests on macOS. Windows batch launchers and probe code have received static / mocked checks; successful execution on a real Windows installation or with real accounts has not been claimed.
 
 ## License
 
-The project retains the root [MIT LICENSE](LICENSE). `lib/device-login.js` preserves its Pi source attribution; the corresponding third-party MIT license is in [third-party/pi/LICENSE](third-party/pi/LICENSE). The bundled Claude HUD runtime retains its [MIT LICENSE](statusline/claude-hud/LICENSE), copyright 2026 Jarrod Watts; its local source provenance, preserved vendor adaptations, and measured aggregate SHA-256 are documented in [statusline/SOURCE.md](statusline/SOURCE.md). Project Code Memory retains its [MIT LICENSE](project-code-memory/LICENSE); source-owner authorization and pinned bundle provenance are recorded in [project-code-memory/SOURCE.md](project-code-memory/SOURCE.md).
+The project retains the root [MIT LICENSE](LICENSE). `lib/device-login.js` preserves its Pi source attribution; the corresponding third-party MIT license is in [third-party/pi/LICENSE](third-party/pi/LICENSE). The statusline script's source and its single adaptation are documented in [statusline/SOURCE.md](statusline/SOURCE.md). Project Code Memory retains its [MIT LICENSE](project-code-memory/LICENSE); source-owner authorization and pinned bundle provenance are recorded in [project-code-memory/SOURCE.md](project-code-memory/SOURCE.md).

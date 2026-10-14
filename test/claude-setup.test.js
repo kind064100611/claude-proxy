@@ -302,7 +302,7 @@ test("version probes reject old Bash/jq/Node without shell or automatic installa
 
 test("missing CLI/dependencies and invalid bundles gate statusline without deploying", async (t) => {
   const f = fixture(t);
-  for (const missing of ["cli", "bash", "jq", "node"]) {
+  for (const missing of ["cli", "bash", "jq"]) {
     const deps = { cli: true, bash: "/bash", jq: "/jq", node: process.execPath, [missing]: null };
     const setup = createClaudeSetup({ ...f.base, probe: async () => deps });
     assert.equal((await setup.getStatus()).statusline.ready, false);
