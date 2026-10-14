@@ -1,0 +1,23 @@
+# Local credentials and private configuration
+**/auth.json
+**/.credentials.json
+**/settings.json
+**/settings.local.json
+**/settings-backups/
+.env
+.env.*
+.claude/
+
+# Temporary files and local output
+*.tmp
+*.temp
+*.log
+*.pid
+.cache/
+gateway-observations/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

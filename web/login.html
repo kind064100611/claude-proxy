@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="auth-nonce" content="__AUTH_NONCE__">
+  <meta name="color-scheme" content="light dark">
+  <title>Local Account Settings</title>
+  <style nonce="__AUTH_NONCE__">
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+      background: #f4f6fa;
+      color: #1d2736;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; padding: 36px 16px; }
+    main { width: min(100%, 760px); margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.55rem, 4vw, 2rem); }
+    h2 { margin: 0 0 8px; font-size: 1.15rem; }
+    p { line-height: 1.6; }
+    .intro { color: #526176; margin: 0 0 22px; }
+    .card { background: #fff; border: 1px solid #dce2ec; border-radius: 14px; padding: 20px; margin: 14px 0; box-shadow: 0 3px 14px rgb(24 39 75 / 5%); }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    .status { color: #526176; margin: 4px 0 12px; }
+    .status[data-kind="success"] { color: #137044; }
+    .status[data-kind="error"] { color: #b42318; }
+    button, .link-button { min-height: 44px; border: 0; border-radius: 8px; padding: 10px 16px; background: #2457c5; color: #fff; font: inherit; font-weight: 650; cursor: pointer; text-decoration: none; }
+    button.secondary { background: #e9eef8; color: #1d2736; }
+    button:disabled { opacity: .62; cursor: not-allowed; }
+    button.busy:disabled { cursor: wait; }
+    button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px solid #f2a900; outline-offset: 3px; }
+    .code { font-size: 1.35rem; font-weight: 750; letter-spacing: .08em; overflow-wrap: anywhere; }
+    .flow { border-top: 1px solid #e4e8ef; padding-top: 12px; }
+    .flow[hidden] { display: none; }
+    label { display: block; font-weight: 650; margin: 12px 0 6px; }
+    textarea { width: 100%; min-height: 130px; resize: vertical; border: 1px solid #aab5c6; border-radius: 8px; padding: 12px; background: Canvas; color: CanvasText; font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .hint, .footnote { color: #526176; font-size: .92rem; }
+    .summary { border-radius: 8px; background: #eef3fb; padding: 12px; overflow-wrap: anywhere; }
+    @media (prefers-color-scheme: dark) {
+      :root { background: #111722; color: #e7edf7; }
+      .intro, .status, .hint, .footnote { color: #b2bfd2; }
+      .card { background: #1a2331; border-color: #364254; box-shadow: none; }
+      .status[data-kind="success"] { color: #73d6a0; }
+      .status[data-kind="error"] { color: #ff9388; }
+      button.secondary, .summary { background: #2a374b; color: #e7edf7; }
+      .flow { border-color: #364254; }
+    }
+    @media (max-width: 520px) {
+      body { padding: 22px 12px; }
+      .card { padding: 16px; }
+      .row > button, .row > .link-button { flex: 1 1 100%; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Local Account Settings</h1>
+      <p class="intro">Manage accounts on this computer. ChatGPT and Copilot use official device authorization: enter your password only on the official website. Access tokens are never displayed, and credentials are stored locally.</p>
+    </header>
+
+    <section class="card" aria-labelledby="chatgpt-heading">
+      <h2 id="chatgpt-heading">ChatGPT</h2>
+      <p id="chatgpt-status" class="status" role="status" aria-live="polite">Loading login status…</p>
+      <p class="hint">Authorize your device on the official OpenAI website. Do not enter your password here.</p>
+      <button id="chatgpt-start" type="button">Login ChatGPT</button>
+      <div id="chatgpt-flow" class="flow" hidden>
+        <p>Complete device authorization on the official OpenAI website:</p>
+        <p id="chatgpt-code" class="code"></p>
+        <div class="row">
+          <button id="chatgpt-copy" class="secondary" type="button">Copy device code</button>
+          <a id="chatgpt-link" class="link-button" target="_blank" rel="noopener noreferrer">Open OpenAI authorization</a>
+        </div>
+        <p id="chatgpt-flow-status" class="status" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="copilot-heading">
+      <h2 id="copilot-heading">GitHub Copilot</h2>
+      <p id="copilot-status" class="status" role="status" aria-live="polite">Loading login status…</p>
+      <p class="hint">Authorize your device on the official GitHub website. Do not enter your password here.</p>
+      <button id="copilot-start" type="button">Login Copilot</button>
+      <div id="copilot-flow" class="flow" hidden>
+        <p>Complete device authorization on the official GitHub website:</p>
+        <p id="copilot-code" class="code"></p>
+        <div class="row">
+          <button id="copilot-copy" class="secondary" type="button">Copy device code</button>
+          <a id="copilot-link" class="link-button" target="_blank" rel="noopener noreferrer">Open GitHub authorization</a>
+        </div>
+        <p id="copilot-flow-status" class="status" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="cli-heading">
+      <h2 id="cli-heading">Configure Claude CLI</h2>
+      <p>Replaces the Claude CLI endpoint, placeholder authentication, and default model. Existing routing keys are backed up; official credentials are untouched. Project, shell, and managed configuration overrides may still apply.</p>
+      <p id="cli-status" class="status" role="status" aria-live="polite">Loading configuration status…</p>
+      <button id="cli-configure" type="button" disabled>Configure Claude CLI</button>
+    </section>
+
+    <p id="storage-path" class="summary" aria-live="polite">Credential directory: loading…</p>
+    <p class="footnote">Local access only. Do not share device codes or API keys.</p>
+  </main>
+  <script nonce="__AUTH_NONCE__">
+    "use strict";
+
+    let nonce = document.querySelector('meta[name="auth-nonce"]').content;
+    const apiHeaders = { "X-Auth-Nonce": nonce, "Accept": "application/json" };
+    const providers = ["chatgpt", "copilot"];
+
+    function setMessage(element, message, kind) {
+      element.textContent = message;
+      element.dataset.kind = kind || "";
+    }
+
+    async function apiRequest(path, options) {
+      const url = new URL(path, window.location.href);
+      if (url.origin !== window.location.origin) throw new Error("Requests must use the local service.");
+      const config = options || {};
+      const headers = new Headers(apiHeaders);
+      if (config.method === "POST") headers.set("Content-Type", "application/json");
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), config.timeoutMs || 10000);
+      try {
+        const response = await fetch(url.href, {
+          method: config.method || "GET",
+          headers,
+          body: config.body,
+          credentials: "same-origin",
+          cache: "no-store",
+          redirect: "error",
+          referrerPolicy: "same-origin",
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          if (path.endsWith("/configure")) {
+            const failure = await response.json();
+            const fields = Array.isArray(failure.fields) ? ` ${failure.fields.join(", ")}` : "";
+            throw Object.assign(new Error(`${failure.error || "Unable to configure. Please try again."}${fields}`), { httpStatus: response.status });
+          }
+          throw new Error(`Local service request failed (HTTP ${response.status}).`);
+        }
+        return await response.json();
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+
+    function renderAuthStatus(status) {
+      const chatgpt = status.chatgpt || {};
+      if (chatgpt.environmentOverride) {
+        setMessage(document.getElementById("chatgpt-status"), "The OPENAI_API_KEY environment variable overrides web login credentials.", "success");
+      } else {
+        setMessage(document.getElementById("chatgpt-status"), chatgpt.configured ? "ChatGPT is configured." : "ChatGPT is not configured yet.", chatgpt.configured ? "success" : "");
+      }
+      renderSetupStatus("cli", status.claudeCli || {});
+      const copilot = status.copilot || {};
+      setMessage(document.getElementById("copilot-status"), copilot.configured ? "GitHub Copilot is configured." : "GitHub Copilot is not configured yet.", copilot.configured ? "success" : "");
+      document.getElementById("storage-path").textContent = `Credential directory: ${String(status.storagePath || "managed by the local service")}`;
+    }
+
+    const setupMessages = {};
+
+    let statusVersion = 0;
+
+    function renderSetupStatus(name, setup) {
+      const statusElement = document.getElementById(`${name}-status`);
+      const button = document.getElementById(`${name}-configure`);
+      const ready = setup.ready === true;
+      button.disabled = !ready || button.dataset.busy === "true";
+      if (button.dataset.busy === "true") return;
+      if (ready && setupMessages[name]) {
+        setMessage(statusElement, setupMessages[name].message, setupMessages[name].kind);
+        return;
+      }
+      let message = setup.reason || (ready ? (setup.configured ? "Already configured and ready." : "Ready to configure.") : "Unavailable.");
+      if (setup.notice) message += ` ${String(setup.notice)}`;
+      setMessage(statusElement, message, ready ? "success" : "");
+    }
+
+    async function refreshStatus() {
+      const version = ++statusVersion;
+      try {
+        const status = await apiRequest("/api/auth/status");
+        if (version !== statusVersion) return;
+        renderAuthStatus(status);
+      } catch (_) {
+        if (version !== statusVersion) return;
+        for (const name of ["cli"]) {
+          document.getElementById(`${name}-configure`).disabled = true;
+          setMessage(document.getElementById(`${name}-status`), "Unable to load status. Make sure the local service is running, then try again.", "error");
+        }
+        for (const id of ["chatgpt-status", "copilot-status"]) {
+          setMessage(document.getElementById(id), "Unable to load status. Make sure the local service is running, then try again.", "error");
+        }
+        document.getElementById("storage-path").textContent = "Credential directory: temporarily unavailable";
+      }
+    }
+
+    async function configureSetup(name, endpoint) {
+      const button = document.getElementById(`${name}-configure`);
+      const statusElement = document.getElementById(`${name}-status`);
+      if (button.disabled || button.dataset.busy === "true") return;
+      delete setupMessages[name];
+      button.dataset.busy = "true";
+      button.disabled = true;
+      button.classList.add("busy");
+      button.textContent = "Configuring Claude CLI…";
+      setMessage(statusElement, "Configuring…");
+      let successMessage = "";
+      let failureMessage = "";
+      try {
+        const result = await apiRequest(endpoint, { method: "POST", body: "{}" });
+        if (result.success !== true) throw new Error("Configuration was not completed.");
+        const detail = "Open a new terminal and run claude, then use /model.";
+        successMessage = `${result.message || "Configuration successful."} ${detail}`;
+        if (result.model) successMessage += ` Model: ${String(result.model)}.`;
+        if (result.notice) successMessage += ` ${String(result.notice)}`;
+      } catch (error) {
+        failureMessage = error.message || "Unable to configure. Please try again.";
+      }
+      setupMessages[name] = { message: failureMessage || successMessage, kind: failureMessage ? "error" : "success" };
+      button.dataset.busy = "false";
+      button.classList.remove("busy");
+      button.textContent = "Configure Claude CLI";
+      await refreshStatus();
+      setMessage(statusElement, setupMessages[name].message, setupMessages[name].kind);
+    }
+
+
+    function officialVerificationUrl(provider, value) {
+      try {
+        const url = new URL(value);
+        const allowed = provider === "chatgpt"
+          ? url.hostname === "auth.openai.com"
+          : url.hostname === "github.com" && url.pathname.replace(/\/$/, "") === "/login/device";
+        if (url.protocol !== "https:" || url.port || !allowed || url.username || url.password || url.search || url.hash) return "";
+        if (provider === "chatgpt" && url.pathname.replace(/\/$/, "") !== "/codex/device") return "";
+        return url.href;
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function flowMessage(status) {
+      if (status === "success" || status === "complete") return "Authorization successful. Updating status…";
+      if (status === "expired") return "The device code has expired. Start login again.";
+      if (status === "error" || status === "failed" || status === "cancelled") return "Authorization was not completed. Check the official website or try again later.";
+      return "Waiting for you to authorize on the official website…";
+    }
+
+    function wait(milliseconds) {
+      return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    }
+
+    async function pollFlow(provider, flow) {
+      const statusElement = document.getElementById(`${provider}-flow-status`);
+      const deadline = Date.now() + 900000;
+      for (let attempts = 0; attempts < 450 && Date.now() < deadline; attempts += 1) {
+        await wait(2000);
+        let result;
+        try {
+          result = await apiRequest(`/api/auth/flow/${encodeURIComponent(flow.id)}`);
+        } catch (_) {
+          setMessage(statusElement, "Unable to check authorization progress. Make sure the local service is still running.", "error");
+          return;
+        }
+        const state = String(result.status || "").toLowerCase();
+        if (state === "success" || state === "complete") {
+          setMessage(statusElement, flowMessage(state), "success");
+          await refreshStatus();
+          return;
+        }
+        if (state === "expired" || state === "error" || state === "failed" || state === "cancelled") {
+          setMessage(statusElement, flowMessage(state), "error");
+          return;
+        }
+        if (state !== "pending" && state !== "starting") {
+          setMessage(statusElement, "The local service returned an unknown authorization status.", "error");
+          return;
+        }
+      }
+      setMessage(statusElement, "Authorization timed out. If you have not finished, start login again.", "error");
+    }
+
+    async function startLogin(provider) {
+      const button = document.getElementById(`${provider}-start`);
+      const flowPanel = document.getElementById(`${provider}-flow`);
+      const flowStatus = document.getElementById(`${provider}-flow-status`);
+      button.disabled = true;
+      flowPanel.hidden = true;
+      setMessage(document.getElementById(`${provider}-status`), "Requesting device authorization…");
+      try {
+        const result = await apiRequest(`/api/auth/${provider}/start`, { method: "POST", body: "{}" });
+        const state = String(result.status || "").toLowerCase();
+        if (state === "success" || state === "complete") {
+          setMessage(flowStatus, flowMessage(state), "success");
+          await refreshStatus();
+          return;
+        }
+        if (state === "error" || state === "failed" || state === "cancelled" || state === "expired") {
+          setMessage(document.getElementById(`${provider}-status`), flowMessage(state), "error");
+          return;
+        }
+        if (state !== "starting" && state !== "pending") throw new Error("Invalid authorization status.");
+        const safeUrl = officialVerificationUrl(provider, result.verificationUrl);
+        if (!result.id || typeof result.userCode !== "string" || !result.userCode.trim() || !safeUrl) {
+          throw new Error("The local service did not return valid official device authorization details.");
+        }
+        const id = String(result.id);
+        document.getElementById(`${provider}-code`).textContent = result.userCode;
+        const link = document.getElementById(`${provider}-link`);
+        link.href = safeUrl;
+        flowPanel.hidden = false;
+        setMessage(flowStatus, flowMessage(state));
+        setMessage(document.getElementById(`${provider}-status`), "Device authorization started.", "success");
+        await pollFlow(provider, { id });
+      } catch (error) {
+        setMessage(document.getElementById(`${provider}-status`), error.message || "Unable to start login. Please try again.", "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function copyCode(provider) {
+      const code = document.getElementById(`${provider}-code`).textContent;
+      try {
+        await navigator.clipboard.writeText(code);
+        setMessage(document.getElementById(`${provider}-flow-status`), "Device code copied. Enter it only on the official website.", "success");
+      } catch (_) {
+        setMessage(document.getElementById(`${provider}-flow-status`), "Clipboard access is unavailable. Copy the device code manually.", "error");
+      }
+    }
+
+    document.getElementById("cli-configure").addEventListener("click", () => configureSetup("cli", "/api/auth/claude/configure"));
+
+    for (const provider of providers) {
+      document.getElementById(`${provider}-start`).addEventListener("click", () => startLogin(provider));
+      document.getElementById(`${provider}-copy`).addEventListener("click", () => copyCode(provider));
+    }
+    refreshStatus();
+  </script>
+</body>
+</html>
