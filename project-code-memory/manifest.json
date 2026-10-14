@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "upstream": {
+    "url": "https://github.com/shanshazhe/projectcodememory.git",
+    "commit": "7dc7b0dad137fa8e1e65af31143f4ead8109ca03"
+  },
+  "files": {
+    "SKILL.md": "c66a1a7b1a72e2f48243d59712ee6510cbdaff2fb2557e0865ef8ff8ae1291f2",
+    "README.md": "736533cee2afc95a136ef92bded42ee09144b0cf473bad7fcb09eb5d3aeea82e",
+    "agents/openai.yaml": "467a29a9fcc9f32360ee4a12f7674aa7e70f3880bef642a84e2d3981cd031e21",
+    "references/record-format.md": "ddf0e1bd40d95af333d866d768b96d24f912353bb154562aee8e305c966c49f3",
+    "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+    "tests/test_pcm.py": "c1b7ea400d2d5f5a8fc85bbb65057c10a9edc93f1f832b96951d3a39f5eabc06",
+    "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
+    "SOURCE.md": "5783eb1ddaefee00d08b93226958cd06dc9b441d82a4fa307515a5a61d3f2879"
+  },
+  "upstreamFiles": {
+    "SKILL.md": "781938de648faed7865d0e955ee798ef3ac07609c6d6b50d54299899180b9d4d",
+    "README.md": "c4250fcc71c6baf551a13c74762a54bfcd202c521dcbf6bdce96a3f103f3c76c",
+    "agents/openai.yaml": "467a29a9fcc9f32360ee4a12f7674aa7e70f3880bef642a84e2d3981cd031e21",
+    "references/record-format.md": "ddf0e1bd40d95af333d866d768b96d24f912353bb154562aee8e305c966c49f3",
+    "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+    "tests/test_pcm.py": "c1b7ea400d2d5f5a8fc85bbb65057c10a9edc93f1f832b96951d3a39f5eabc06"
+  },
+  "installFiles": [
+    "scripts/pcm.py",
+    "references/record-format.md",
+    "LICENSE",
+    "SOURCE.md",
+    "SKILL.md"
+  ]
+}

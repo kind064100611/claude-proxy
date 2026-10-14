@@ -68,8 +68,8 @@ test("installed Claude CLI transparently reads exact archived evidence with its 
       await options.onChunk({ choices: [{ delta: {}, finish_reason: args ? "tool_calls" : "stop" }],
         usage: { prompt_tokens: 2048, completion_tokens: 20, cached_tokens: 1024 } });
       return { streamed: true };
-    } } : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [{ id: "gpt-5.4", owned_by: "openai" }] }) } : nativeRequire(name),
-    __dirname: path.dirname(filename), process, Buffer, URL,
+    } } : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [{ id: "gpt-5.4", owned_by: "openai" }] }) } : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) } : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) } : nativeRequire(name),
+    __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL,
     console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval
   };
   vm.runInNewContext(fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0], context, { filename });

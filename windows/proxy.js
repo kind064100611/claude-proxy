@@ -10,6 +10,8 @@ const { createObservationPack, migrateFeatureConfig } = require("../lib/observat
 const { defaultStore: credentialStore } = require("../lib/credential-store");
 const { createAuthRouter } = require("../lib/auth-server");
 const { createClaudeSetup, getClaudeConfigRoot } = require("../lib/claude-setup");
+const { createMacosService } = require("../lib/macos-service");
+const { createProjectMemoryInstaller } = require("../lib/project-memory-install");
 const observationPack = createObservationPack({
   onWarning: (details) => logWarn("observation-pack", "Observation archive warning", details),
   onEvent: (details) => logEvent("observation-pack", "Gateway observation pack configuration", details)
@@ -855,8 +857,11 @@ function streamToClient(openaiBody, model, primaryModel, requestId, clientRes) {
     });
 }
 
+const macosService = createMacosService({ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy });
 const authRouter = createAuthRouter({
   port: PORT,
+  macosService,
+  projectMemory: createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() }),
   store: credentialStore,
   setup: createClaudeSetup({ store: credentialStore, getAvailableModels }),
   onCredentialsChanged: () => getAvailableModels.invalidate()

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Code Memory"
+  short_description: "Reuse verified code analysis across coding tasks"
+  default_prompt: "Use $project-code-memory to reuse verified project knowledge while analyzing and changing this codebase."

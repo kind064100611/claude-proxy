@@ -25,6 +25,8 @@ for (const platform of ["mac", "windows"]) {
     await new Promise((resolve) => reserve.close(resolve));
     let server;
     let router;
+    const serviceCalls = [];
+    const memoryCalls = [];
     const upstream = [];
     const usage = { input_tokens: 100, output_tokens: 3, input_tokens_details: { cached_tokens: 64 } };
     const openaiFetch = async (url, options) => {
@@ -57,13 +59,24 @@ for (const platform of ["mac", "windows"]) {
     const context = {
       require: (name) => {
         if (name === "http") return { createServer: (handler) => { server = http.createServer(handler); return server; } };
+        if (name === "../lib/macos-service") return { createMacosService: (options) => {
+          serviceCalls.push(options);
+          return { getStatus: async () => ({ supported: platform === "mac", ready: true, instance: { pid: 42, installationId: "invalid-private-id" } }),
+            configure: async () => ({ status: 200, body: { state: "already_registered" } }) };
+        } };
+        if (name === "../lib/project-memory-install") return { createProjectMemoryInstaller: (options) => {
+          assert.equal(options.configRoot, configRoot);
+          memoryCalls.push("factory");
+          return { getStatus: async () => ({ installed: false, ready: true, state: "absent" }),
+            install: async () => { memoryCalls.push("install"); return { ok: true, changed: true, installed: true, ready: true, state: "installed" }; } };
+        } };
         if (name === "../lib/credential-store") return { defaultStore: store };
         if (name === "../lib/model-discovery") return { createModelDiscovery: () => Object.assign(async () => ({ object: "list", data: [
           { id: "gpt-test" }, { id: "claude-sonnet-test" }
         ] }), { invalidate() {} }) };
         if (name === "../lib/auth-server") return { createAuthRouter: (options) => { router = auth.createAuthRouter(options); return router; } };
         if (name === "../lib/claude-setup") return { ...setup, getClaudeConfigRoot: () => configRoot,
-          createClaudeSetup: (options) => setup.createClaudeSetup({ ...options, env: {}, configRoot, probe: async () => ({ cli: true }) }) };
+          createClaudeSetup: (options) => setup.createClaudeSetup({ ...options, env: {}, configRoot, probe: async () => ({ cli: true, bash: "/bin/bash", jq: "test-jq", node: process.execPath }) }) };
         if (name === "../lib/observation-pack") return { ...observations, createObservationPack: (options) => observations.createObservationPack({
           ...options, configFile: path.join(root, "features.json"), archiveRoot: path.join(root, "observations") }) };
         if (name === "../lib/openai-responses") return { ...responses, requestResponses: (body, options) => responses.requestResponses(body, {
@@ -72,12 +85,18 @@ for (const platform of ["mac", "windows"]) {
           ...options, fetchImpl: copilotFetch, loadAuth: async () => ({ token: "mock-only", baseUrl: "https://mock.example" }) }) };
         return nativeRequire(name);
       },
-      __dirname: path.dirname(filename), process, Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval,
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval,
       console: { log() {}, warn() {}, error() {} }
     };
     const source = fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0].replace("const PORT = 8082;", `const PORT = ${port};`);
     vm.runInNewContext(source + "\nsyncClaudeSettings();", context, { filename });
+    assert.deepEqual(memoryCalls, ["factory"]);
+    assert.equal(serviceCalls.length, 1);
+    assert.equal(serviceCalls[0].proxyPath, filename);
+    assert.equal(serviceCalls[0].port, port);
+    assert.equal(typeof serviceCalls[0].onHandoff, "function");
     assert.deepEqual(fs.readFileSync(settingsFile), original);
+    assert.equal(fs.existsSync(path.join(configRoot, "claude-proxy")), false);
     assert.equal(fs.existsSync(store.directory), false);
     assert.equal(fs.existsSync(path.join(root, "features.json")), false);
     await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
@@ -90,6 +109,13 @@ for (const platform of ["mac", "windows"]) {
     const headers = { "X-Auth-Nonce": nonce, Origin: base, "Content-Type": "application/json" };
     assert.equal((await fetch(base + "/api/auth/status", { headers })).status, 200);
     assert.deepEqual(fs.readFileSync(settingsFile), original);
+    assert.deepEqual(memoryCalls, ["factory"]);
+    assert.equal(fs.existsSync(path.join(configRoot, "skills")), false);
+    const memory = await fetch(base + "/api/auth/project-memory/install", { method: "POST", headers, body: "{}" });
+    assert.equal(memory.status, 200);
+    assert.equal((await memory.json()).installed, true);
+    assert.equal(memory.headers.get("access-control-allow-origin"), null);
+    assert.deepEqual(memoryCalls, ["factory", "install"]);
     const models = await (await fetch(base + "/v1/models?limit=1000")).json();
     assert.deepEqual(models.data.map((model) => model.id), ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test[1m]"]);
     const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } };
@@ -124,5 +150,18 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(saved.statusLine.command, "existing");
     const backups = path.join(configRoot, "claude-proxy", "settings-backups");
     assert.deepEqual(fs.readFileSync(path.join(backups, fs.readdirSync(backups)[0])), original);
+    const state = await (await fetch(base + "/api/auth/status", { headers })).json();
+    assert.equal(state.statusline.ready, true);
+    assert.equal(state.macosService.instance, undefined);
+    const serviceResult = await fetch(base + "/api/auth/macos/service/configure", { method: "POST", headers, body: "{}" });
+    assert.equal(serviceResult.status, 200);
+    assert.equal((await serviceResult.json()).state, "already_registered");
+    assert.equal(serviceResult.headers.get("access-control-allow-origin"), null);
+    const statusline = await fetch(base + "/api/auth/statusline/configure", { method: "POST", headers, body: "{}" });
+    assert.equal(statusline.status, 200);
+    assert.equal((await statusline.json()).success, true);
+    const latest = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+    assert.deepEqual(latest.env, saved.env);
+    assert.notEqual(latest.statusLine.command, "existing");
   });
 }

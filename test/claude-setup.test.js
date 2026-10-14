@@ -10,9 +10,11 @@ function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-setup-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const settingsFile = path.join(root, "settings.json");
-  const state = { auth: { openai: { type: "api_key", key: "test-key" } }, probes: 0, catalogs: 0 };
+  const state = { auth: { openai: { type: "api_key", key: "test-key" } }, probes: 0, catalogs: 0, deployed: 0, cleaned: 0 };
   const store = { readAuth: () => state.auth };
-  const base = { configRoot: root, env: {}, store,
+  const installer = { validateBundle() {}, deploy() { state.deployed++; return { command: "test-statusline-command", created: true }; },
+    cleanup() { state.cleaned++; }, isConfigured: (statusLine) => statusLine?.command === "test-statusline-command" };
+  const base = { configRoot: root, env: {}, store, installer,
     probe: async () => { state.probes++; return { cli: true, bash: "/bin/bash", jq: "/bin/jq", node: process.execPath }; },
     getAvailableModels: async () => { state.catalogs++; return { data: [{ id: "gpt-test" }] }; } };
   const setup = createClaudeSetup({ ...base, ...options });
@@ -25,6 +27,8 @@ test("read-only status uses cached probes, never models or configuration writes,
   const status = await f.setup.getStatus();
   assert.equal(status.claudeCli.ready, false);
   assert.match(status.claudeCli.reason, /credential/);
+  assert.equal(status.statusline.ready, true);
+  assert.equal(f.state.deployed, 0);
   await f.setup.getStatus();
   assert.equal(f.state.probes, 1);
   assert.equal(f.state.catalogs, 0);
@@ -68,6 +72,7 @@ for (const value of ["invalid-private-content", "[]", "null", '{"env":[]}', '{"e
     const f = fixture(t); f.write(value);
     assert.equal((await f.setup.getStatus()).claudeCli.ready, false);
     await assert.rejects(f.setup.configureCli(), /Settings/);
+    await assert.rejects(f.setup.configureStatusline(), /Settings/);
     assert.equal(fs.readFileSync(f.settingsFile, "utf8"), value);
   });
 }
@@ -195,6 +200,121 @@ test("custom actual config root writes only the selected CLI root", async (t) =>
   await setup.configureCli();
   const saved = JSON.parse(fs.readFileSync(path.join(custom, "settings.json"), "utf8"));
   assert.equal(saved.env.ANTHROPIC_BASE_URL, "http://localhost:8082");
+  assert.equal(fs.existsSync(f.settingsFile), false);
+});
+
+test("two buttons and distinct services serialize latest-settings merges", async (t) => {
+  const f = fixture(t); f.write({ env: { KEEP: "yes" } });
+  const second = createClaudeSetup(f.base);
+  await Promise.all([f.setup.configureCli(), second.configureStatusline()]);
+  assert.equal(f.read().env.ANTHROPIC_BASE_URL, "http://localhost:8082");
+  assert.equal(f.read().env.KEEP, "yes");
+  assert.equal(f.read().statusLine.command, "test-statusline-command");
+  assert.equal((await f.setup.getStatus()).statusline.configured, true);
+});
+
+test("save failure leaves original bytes and cleans only this statusline deployment", async (t) => {
+  const f = fixture(t); f.write({ statusLine: { command: "original" } });
+  const bytes = fs.readFileSync(f.settingsFile);
+  const setup = createClaudeSetup({ ...f.base, fsImpl: { ...fs, renameSync() { throw new Error("private-failure"); } } });
+  await assert.rejects(setup.configureStatusline(), /Existing settings were kept/);
+  assert.deepEqual(fs.readFileSync(f.settingsFile), bytes);
+  assert.equal(f.state.cleaned, 1);
+  assert.equal(fs.readdirSync(f.root).some((name) => name.endsWith(".tmp")), false);
+  const failed = createClaudeSetup({ ...f.base, installer: { ...f.base.installer, deploy() { throw new Error("private-deployment"); } } });
+  await assert.rejects(failed.configureStatusline(), /deploy/);
+  assert.deepEqual(fs.readFileSync(f.settingsFile), bytes);
+});
+
+test("custom actual config root and statusline leave routing untouched", async (t) => {
+  const f = fixture(t);
+  f.state.auth = {};
+  const custom = path.join(f.root, "custom cli");
+  const setup = createClaudeSetup({ ...f.base, configRoot: custom, env: { CLAUDE_CONFIG_DIR: custom } });
+  assert.match((await setup.getStatus()).statusline.notice, /CLAUDE_CONFIG_DIR/);
+  await setup.configureStatusline();
+  const saved = JSON.parse(fs.readFileSync(path.join(custom, "settings.json"), "utf8"));
+  assert.equal(saved.env, undefined);
+  assert.equal(fs.existsSync(f.settingsFile), false);
+});
+
+test("real bundled statusline setup is independent, idempotent and preserves reused deployments on save failure", async (t) => {
+  const f = fixture(t);
+  const setup = createClaudeSetup({ ...f.base, installer: undefined });
+  f.state.auth = {};
+  await setup.configureStatusline();
+  const first = f.read();
+  assert.equal(first.env, undefined);
+  assert.equal((await setup.getStatus()).statusline.configured, true);
+  await setup.configureStatusline();
+  assert.deepEqual(f.read(), first);
+  const root = path.join(f.root, "claude-proxy", "statusline");
+  assert.equal(fs.readdirSync(root).length, 1);
+  f.write({ statusLine: { type: "command", command: "other-personal-script" } });
+  const failing = createClaudeSetup({ ...f.base, installer: undefined, fsImpl: { ...fs, renameSync() { throw new Error("save failure"); } } });
+  await assert.rejects(failing.configureStatusline(), /Existing settings were kept/);
+  assert.equal(fs.readdirSync(root).length, 1);
+  assert.equal(f.read().statusLine.command, "other-personal-script");
+});
+
+test("Statusline backs up exact bytes and preserves unrelated configuration without credentials", async (t) => {
+  const f = fixture(t);
+  f.state.auth = {};
+  const original = Buffer.from('﻿{ "env": {"KEEP":"yes"}, "statusLine":{"type":"command","command":"old"}, "enabledPlugins":{"other":true}, "apiKeyHelper":"untouched" }\n');
+  fs.writeFileSync(f.settingsFile, original);
+  await f.setup.configureStatusline();
+  assert.deepEqual(f.read().env, { KEEP: "yes" });
+  assert.deepEqual(f.read().enabledPlugins, { other: true });
+  assert.equal(f.read().apiKeyHelper, "untouched");
+  const backups = path.join(f.root, "claude-proxy", "settings-backups");
+  assert.deepEqual(fs.readFileSync(path.join(backups, fs.readdirSync(backups)[0])), original);
+  assert.equal(f.state.catalogs, 0);
+});
+
+test("failed settings commit retains a deployment referenced by an external latest edit", async (t) => {
+  const f = fixture(t); f.write({ before: true });
+  const setup = createClaudeSetup({ ...f.base, fsImpl: { ...fs, writeFileSync(file, ...args) {
+    fs.writeFileSync(file, ...args);
+    if (file.endsWith(".tmp")) f.write({ external: true, statusLine: { type: "command", command: "test-statusline-command" } });
+  } } });
+  await assert.rejects(setup.configureStatusline(), /changed during configuration/);
+  assert.equal(f.state.cleaned, 0);
+  assert.equal(f.read().external, true);
+});
+
+test("version probes reject old Bash/jq/Node without shell or automatic installation", async () => {
+  for (const [bashVersion, jqVersion, nodeVersion, expected] of [
+    ["2.9", "1.6", "18.0", [false, true, true]],
+    ["3.2", "1.5", "18.0", [true, false, true]],
+    ["3.2", "1.6", "17.0", [true, true, false]],
+    ["3.2", "2.0", "18.0", [true, true, true]]
+  ]) {
+    const probe = createSetupProbe({ env: { PATH: "/fake" }, home: "/fake-home", node: "/fake-node",
+      fsImpl: { statSync: () => ({ isFile: () => true }) }, execFileImpl(file, args, options, done) {
+        assert.deepEqual(args, ["--version"]);
+        assert.equal(options.shell, false);
+        done(null, file.endsWith("bash") ? `GNU bash, version ${bashVersion}` : file.endsWith("jq") ? `jq-${jqVersion}` : file.endsWith("claude") ? "2.1.296 (Claude Code)" : `v${nodeVersion}.0`);
+      } });
+    const deps = await probe();
+    assert.deepEqual([Boolean(deps.bash), Boolean(deps.jq), Boolean(deps.node)], expected);
+  }
+});
+
+test("missing CLI/dependencies and invalid bundles gate statusline without deploying", async (t) => {
+  const f = fixture(t);
+  for (const missing of ["cli", "bash", "jq", "node"]) {
+    const deps = { cli: true, bash: "/bash", jq: "/jq", node: process.execPath, [missing]: null };
+    const setup = createClaudeSetup({ ...f.base, probe: async () => deps });
+    assert.equal((await setup.getStatus()).statusline.ready, false);
+    await assert.rejects(setup.configureStatusline(), /Install|Bash/);
+  }
+  const setup = createClaudeSetup({ ...f.base, installer: { validateBundle() { throw new Error("private-path"); } } });
+  await assert.rejects(setup.configureStatusline(), (error) => {
+    assert.equal(setupFailure(error).status, 503);
+    assert.ok(!JSON.stringify(setupFailure(error)).includes("private-path"));
+    return true;
+  });
+  assert.equal(f.state.deployed, 0);
   assert.equal(fs.existsSync(f.settingsFile), false);
 });
 

@@ -12,5 +12,8 @@ for (const platform of ["mac", "windows"]) {
     assert.match(source, /getSettingsPaths\(\) \{ return \[getClaudeSettingsPath\(\)\]; \}/);
     assert.match(source, /if \(!isResponsesModel\(model\)\) \{ sendJsonError\(res, 400/);
     assert.match(source, /onCacheUsage/);
+    assert.match(source, /createMacosService\(\{ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy \}\)/);
+    assert.match(source, /const authRouter = createAuthRouter\(\{[\s\S]*?macosService,/);
+    assert.doesNotMatch(source, /macosService\.configure\(/);
   });
 }

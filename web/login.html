@@ -101,6 +101,28 @@
       <button id="cli-configure" type="button" disabled>Configure Claude CLI</button>
     </section>
 
+    <section class="card" id="macos-service-card" aria-labelledby="macos-service-heading" hidden>
+      <h2 id="macos-service-heading">Register macOS Service</h2>
+      <p>Register a current-user login service and start it immediately. Active requests and login flows may be interrupted; this page will reconnect. The service depends on this repository and Node staying at their current paths.</p>
+      <p id="macos-service-status" class="status" role="status" aria-live="polite">Loading service status…</p>
+      <button id="macos-service-configure" type="button" disabled>Register macOS Service</button>
+    </section>
+
+    <section class="card" aria-labelledby="project-memory-heading">
+      <h2 id="project-memory-heading">Install Project Code Memory</h2>
+      <p>Install the bundled skill into your Claude CLI skills directory. Requires Claude CLI and Python 3.9+; install missing dependencies manually. Existing different versions are never overwritten.</p>
+      <p>Skill use is model-driven, not a hook. Using query creates a cache in the target project and updates its .gitignore. Open a new Claude session after installation.</p>
+      <p id="project-memory-status" class="status" role="status" aria-live="polite">Loading installation status…</p>
+      <button id="project-memory-install" type="button" disabled>Install Project Code Memory</button>
+    </section>
+
+    <section class="card" aria-labelledby="statusline-heading">
+      <h2 id="statusline-heading">Configure Statusline</h2>
+      <p>Replaces the current statusLine command, backing it up, and keeps unrelated plugins unchanged. Requires Claude CLI, Bash 3+, jq 1.6+, and Node.js 18+ (Git Bash on Windows); login is not required.</p>
+      <p id="statusline-status" class="status" role="status" aria-live="polite">Loading configuration status…</p>
+      <button id="statusline-configure" type="button" disabled>Configure Statusline</button>
+    </section>
+
     <p id="storage-path" class="summary" aria-live="polite">Credential directory: loading…</p>
     <p class="footnote">Local access only. Do not share device codes or API keys.</p>
   </main>
@@ -135,8 +157,9 @@
           referrerPolicy: "same-origin",
           signal: controller.signal
         });
+        if (response.status === 202 && path === "/api/auth/macos/service/configure") return { ...(await response.json()), _httpStatus: 202 };
         if (!response.ok) {
-          if (path.endsWith("/configure")) {
+          if (path.endsWith("/configure") || path.endsWith("/project-memory/install")) {
             const failure = await response.json();
             const fields = Array.isArray(failure.fields) ? ` ${failure.fields.join(", ")}` : "";
             throw Object.assign(new Error(`${failure.error || "Unable to configure. Please try again."}${fields}`), { httpStatus: response.status });
@@ -157,12 +180,163 @@
         setMessage(document.getElementById("chatgpt-status"), chatgpt.configured ? "ChatGPT is configured." : "ChatGPT is not configured yet.", chatgpt.configured ? "success" : "");
       }
       renderSetupStatus("cli", status.claudeCli || {});
+      renderSetupStatus("statusline", status.statusline || {});
+      renderProjectMemory(status.projectMemory || {});
+      renderMacosService(status.macosService || {});
+      const service = status.macosService;
+      if (service?.state === "pending" && service.operation?.id && !macosServiceBusy) followMacosOperation(service);
       const copilot = status.copilot || {};
       setMessage(document.getElementById("copilot-status"), copilot.configured ? "GitHub Copilot is configured." : "GitHub Copilot is not configured yet.", copilot.configured ? "success" : "");
       document.getElementById("storage-path").textContent = `Credential directory: ${String(status.storagePath || "managed by the local service")}`;
     }
 
+    let projectMemoryBusy = false;
+    let projectMemoryMessage = null;
+    function renderProjectMemory(status) {
+      const button = document.getElementById("project-memory-install");
+      const element = document.getElementById("project-memory-status");
+      button.disabled = projectMemoryBusy || status.ready !== true || status.installed === true;
+      if (projectMemoryMessage) setMessage(element, projectMemoryMessage.text, projectMemoryMessage.kind);
+      else if (status.installed) setMessage(element, "Project Code Memory is installed. Start a new Claude session to use it.", "success");
+      else setMessage(element, status.ready ? "Ready to install Project Code Memory." : (status.reason || "Project Code Memory is not ready to install."), "");
+    }
+    async function installProjectMemory() {
+      if (projectMemoryBusy || document.getElementById("project-memory-install").disabled) return;
+      projectMemoryBusy = true; projectMemoryMessage = null; renderProjectMemory({ ready: true });
+      const button = document.getElementById("project-memory-install");
+      button.textContent = "Installing…"; button.classList.add("busy");
+      try {
+        const result = await apiRequest("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+        if (result.ok !== true || result.installed !== true) throw new Error("Project Code Memory installation could not be confirmed.");
+        projectMemoryMessage = { text: result.changed ? "Project Code Memory installed. Start a new Claude session to use it." : "Project Code Memory is already installed. Start a new Claude session to use it.", kind: "success" };
+      } catch (error) { projectMemoryMessage = { text: error.message || "Project Code Memory installation failed.", kind: "error" }; }
+      projectMemoryBusy = false; button.classList.remove("busy"); button.textContent = "Install Project Code Memory";
+      await refreshStatus();
+    }
+
     const setupMessages = {};
+    let macosServiceBusy = false;
+    let macosPolling = false;
+    let macosMessage;
+    let lastMacosService = {};
+
+    function renderMacosService(service) {
+      const card = document.getElementById("macos-service-card");
+      const button = document.getElementById("macos-service-configure");
+      const statusElement = document.getElementById("macos-service-status");
+      lastMacosService = service;
+      const supported = service.supported === true;
+      card.hidden = !supported;
+      button.disabled = !supported || service.ready !== true || service.state === "pending" || macosServiceBusy;
+      if (!supported || macosServiceBusy) return;
+      if (macosMessage) { setMessage(statusElement, macosMessage.message, macosMessage.kind); return; }
+      if (service.state === "pending") setMessage(statusElement, "Registration is in progress. Wait for this page to reconnect.", "");
+      else if (service.reason) setMessage(statusElement, String(service.reason), "error");
+      else setMessage(statusElement, service.running && service.registered ? "macOS service is running and registered." : "Ready to register macOS service.", service.running ? "success" : "");
+    }
+
+    async function recoverNonce() {
+      const url = new URL("/login", window.location.href);
+      if (url.origin !== window.location.origin) throw new Error("Local service unavailable.");
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 3000);
+      try {
+        const response = await fetch(url.href, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
+        if (!response.ok) throw new Error("Local service unavailable.");
+        const html = await response.text();
+        const parsed = new DOMParser().parseFromString(html, "text/html");
+        const value = parsed.querySelector('meta[name="auth-nonce"]')?.content;
+        if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) throw new Error("Local service unavailable.");
+        nonce = value;
+        apiHeaders["X-Auth-Nonce"] = value;
+      } finally { window.clearTimeout(timer); }
+    }
+
+    async function reconnectMacosStatus(deadline) {
+      while (Date.now() < deadline) {
+        try {
+          const status = await apiRequest("/api/auth/status", { timeoutMs: 3000 });
+          renderMacosService(status.macosService || {});
+          return status.macosService || {};
+        } catch (_) {
+          lastMacosService = { ...lastMacosService, ready: false };
+          document.getElementById("macos-service-configure").disabled = true;
+          try { await recoverNonce(); } catch (_) {}
+          await wait(1000);
+        }
+      }
+      throw new Error("Unable to confirm registration. Check service status; avoid retrying an interrupted request.");
+    }
+
+    async function configureMacosService() {
+      const button = document.getElementById("macos-service-configure");
+      if (button.disabled || macosServiceBusy) return;
+      const before = lastMacosService;
+      const installationId = before.instance?.installationId || "";
+      const previousOperation = before.operation?.id;
+      const deadline = Date.now() + 100000;
+      macosServiceBusy = true;
+      macosMessage = null;
+      button.disabled = true;
+      setMessage(document.getElementById("macos-service-status"), "Registration is pending; this is not yet complete. The page will reconnect.");
+      try {
+        let result;
+        try { result = await apiRequest("/api/auth/macos/service/configure", { method: "POST", body: "{}" }); }
+        catch (error) {
+          if (error.httpStatus) throw error;
+          // Never repeat a lost POST; check its operation across the nonce transition first.
+          const current = await reconnectMacosStatus(deadline);
+          if (!current.operation?.id || current.operation.id === previousOperation) throw new Error("The request outcome is unknown. Check service status before trying again.");
+          result = { accepted: true, operationId: current.operation.id };
+        }
+        if (result.state === "already_registered") {
+          macosMessage = { message: "The matching macOS service is already running. Nothing was changed.", kind: "success" };
+        } else if (result._httpStatus === 202 || result.accepted === true) {
+          await pollMacosService(result.operationId, installationId, deadline);
+          macosMessage = { message: "macOS service is running and registered.", kind: "success" };
+        } else throw new Error("Registration was not confirmed. Check status before trying again.");
+      } catch (error) {
+        macosMessage = { message: error.message || "Unable to confirm registration. Check service status; avoid retrying an interrupted request.", kind: "error" };
+      } finally {
+        macosServiceBusy = false;
+        renderMacosService(lastMacosService);
+      }
+    }
+
+    async function followMacosOperation(service) {
+      macosServiceBusy = true;
+      setMessage(document.getElementById("macos-service-status"), "Registration is pending; this page is waiting for verified completion.");
+      try {
+        await pollMacosService(service.operation.id, service.instance?.installationId || "");
+        macosMessage = { message: "macOS service is running and registered.", kind: "success" };
+      } catch (error) { macosMessage = { message: error.message, kind: "error" }; }
+      finally { macosServiceBusy = false; renderMacosService(lastMacosService); }
+    }
+
+    async function pollMacosService(operationId, installationId, deadline = Date.now() + 100000) {
+      if (!operationId || macosPolling) throw new Error("The operation could not be identified.");
+      macosPolling = true;
+      try {
+        while (Date.now() < deadline) {
+          await wait(1000);
+          const service = await reconnectMacosStatus(deadline);
+          if (service.operation?.id !== operationId) throw new Error("The service operation changed. Check status before trying again.");
+          if (!service.instance || !Number.isSafeInteger(service.instance.pid) || service.instance.pid < 1 ||
+            !/^[a-f0-9]{64}$/.test(service.instance.installationId) || (installationId && service.instance.installationId !== installationId)) throw new Error("Service identity could not be verified.");
+          if (service.operation.phase === "completed") {
+            if (service.running === true && service.registered === true) return;
+            throw new Error("Launch service verification failed.");
+          }
+          if (service.operation.phase === "failed") {
+            if (service.operation.recovery === "recovered") throw new Error("Registration failed; the original proxy was recovered.");
+            if (service.operation.recovery === "recovery_failed") throw new Error("Registration and recovery failed. Start mac/start-proxy.sh manually and inspect the service.");
+            throw new Error("Registration failed. Start mac/start-proxy.sh manually if needed.");
+          }
+          if (service.operation.phase === "cancelled") throw new Error("Registration was cancelled before handoff. The original proxy was not stopped.");
+        }
+        throw new Error("Unable to confirm registration. Check service status; avoid retrying an interrupted request.");
+      } finally { macosPolling = false; }
+    }
 
     let statusVersion = 0;
 
@@ -189,7 +363,7 @@
         renderAuthStatus(status);
       } catch (_) {
         if (version !== statusVersion) return;
-        for (const name of ["cli"]) {
+        for (const name of ["cli", "statusline"]) {
           document.getElementById(`${name}-configure`).disabled = true;
           setMessage(document.getElementById(`${name}-status`), "Unable to load status. Make sure the local service is running, then try again.", "error");
         }
@@ -197,6 +371,10 @@
           setMessage(document.getElementById(id), "Unable to load status. Make sure the local service is running, then try again.", "error");
         }
         document.getElementById("storage-path").textContent = "Credential directory: temporarily unavailable";
+        document.getElementById("macos-service-configure").disabled = true;
+        setMessage(document.getElementById("macos-service-status"), "Unable to load macOS service status. Configuration is disabled.", "error");
+        document.getElementById("project-memory-install").disabled = true;
+        if (!projectMemoryMessage) setMessage(document.getElementById("project-memory-status"), "Unable to load Project Code Memory status. Installation is disabled.", "error");
       }
     }
 
@@ -208,14 +386,16 @@
       button.dataset.busy = "true";
       button.disabled = true;
       button.classList.add("busy");
-      button.textContent = "Configuring Claude CLI…";
+      button.textContent = name === "cli" ? "Configuring Claude CLI…" : "Configuring Statusline…";
       setMessage(statusElement, "Configuring…");
       let successMessage = "";
       let failureMessage = "";
       try {
         const result = await apiRequest(endpoint, { method: "POST", body: "{}" });
         if (result.success !== true) throw new Error("Configuration was not completed.");
-        const detail = "Open a new terminal and run claude, then use /model.";
+        const detail = name === "cli"
+          ? "Open a new terminal and run claude, then use /model."
+          : "Statusline is configured for the next refresh or new session.";
         successMessage = `${result.message || "Configuration successful."} ${detail}`;
         if (result.model) successMessage += ` Model: ${String(result.model)}.`;
         if (result.notice) successMessage += ` ${String(result.notice)}`;
@@ -225,7 +405,7 @@
       setupMessages[name] = { message: failureMessage || successMessage, kind: failureMessage ? "error" : "success" };
       button.dataset.busy = "false";
       button.classList.remove("busy");
-      button.textContent = "Configure Claude CLI";
+      button.textContent = name === "cli" ? "Configure Claude CLI" : "Configure Statusline";
       await refreshStatus();
       setMessage(statusElement, setupMessages[name].message, setupMessages[name].kind);
     }
@@ -336,6 +516,9 @@
     }
 
     document.getElementById("cli-configure").addEventListener("click", () => configureSetup("cli", "/api/auth/claude/configure"));
+    document.getElementById("statusline-configure").addEventListener("click", () => configureSetup("statusline", "/api/auth/statusline/configure"));
+    document.getElementById("macos-service-configure").addEventListener("click", configureMacosService);
+    document.getElementById("project-memory-install").addEventListener("click", installProjectMemory);
 
     for (const provider of providers) {
       document.getElementById(`${provider}-start`).addEventListener("click", () => startLogin(provider));

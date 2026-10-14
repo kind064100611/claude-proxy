@@ -164,19 +164,87 @@ test("real HTTP device completion persists login, hides secrets and invalidates 
   }
 });
 
+test("Project Code Memory API applies local guards, safe status, and fixed failure mapping", async (t) => {
+  let installs = 0;
+  const service = { getStatus: async () => ({ installed: false, ready: true, state: "absent", reason: "unsafe-reason", notice: "unsafe-value", secret: "/private" }), install: async () => { installs++; return { ok: true, changed: false, installed: true, ready: true, state: "installed", secret: "/private" }; } };
+  const { api, port, router, nonce } = await fixture(t, { projectMemory: service });
+  let remoteStatus;
+  await router({ url: "/api/auth/project-memory/install", method: "POST", headers: { host: `localhost:${port}`, "x-auth-nonce": nonce },
+    socket: { remoteAddress: "192.0.2.1" } }, { setHeader() {}, writeHead(code) { remoteStatus = code; }, end() {} });
+  assert.equal(remoteStatus, 403);
+  const status = JSON.parse((await api("/api/auth/status")).text);
+  assert.deepEqual(Object.keys(status.projectMemory).sort(), ["installed", "notice", "ready", "reason", "state"]);
+  assert.ok(!(await api("/api/auth/status")).text.includes("/private"));
+  const route = "/api/auth/project-memory/install";
+  for (const headers of [{ "X-Auth-Nonce": "wrong" }, { Origin: "https://evil.example" }, { "Content-Type": "text/plain" }]) assert.equal((await api(route, { method: "POST", body: "{}", headers })).status, 403);
+  assert.equal((await api(route, { method: "OPTIONS" })).status, 405);
+  assert.equal((await request(port, route, { method: "POST", body: "{}" })).status, 403);
+  for (const body of [JSON.stringify({ unexpected: true }), "null", "[]", "1", "\"text\"", "", "{bad}"]) {
+    assert.equal((await api(route, { method: "POST", body })).status, 400);
+  }
+  assert.equal((await api(route, { method: "POST", body: " ".repeat(MAX_AUTH_BODY_BYTES + 1) })).status, 413);
+  assert.equal((await api(route, { method: "POST", body: "{}", headers: { Host: "evil.example" } })).status, 403);
+  assert.equal((await api(route)).status, 404);
+  assert.equal(installs, 0);
+  const result = await api(route, { method: "POST", body: "{}" });
+  assert.equal(result.status, 200); assert.equal(result.headers["cache-control"], "no-store");
+  assert.equal(JSON.parse(result.text).changed, false); assert.ok(!result.text.includes("/private")); assert.equal(installs, 1);
+});
+
+test("Project Code Memory installs independently of damaged settings and absent proxy credentials", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pcm-http-independent-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "settings.json"), "{damaged settings");
+  const projectMemory = require("../lib/project-memory-install").createProjectMemoryInstaller({ configRoot: root,
+    probe: async () => ({ cli: true, python: true }) });
+  const { api } = await fixture(t, { env: {}, projectMemory, setupFactory: (store) => createClaudeSetup({ configRoot: root, store, env: {},
+    probe: async () => ({ cli: true }) }) });
+  const status = JSON.parse((await api("/api/auth/status")).text);
+  assert.equal(status.claudeCli.ready, false);
+  assert.equal(status.chatgpt.configured, false);
+  assert.equal(status.projectMemory.ready, true);
+  const response = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse(response.text).installed, true);
+  assert.equal(fs.readFileSync(path.join(root, "settings.json"), "utf8"), "{damaged settings");
+});
+
+test("Project Code Memory fixed errors and unavailable status do not leak raw data", async (t) => {
+  for (const code of ["PROJECT_MEMORY_BUSY", "PROJECT_MEMORY_UNAVAILABLE", "EIO"]) {
+    const { api } = await fixture(t, { projectMemory: { getStatus: async () => ({ state: "secret_code", ready: true, installed: true, reason: "private reason" }),
+      install: async () => { throw Object.assign(new Error("private output"), { code }); } } });
+    const status = JSON.parse((await api("/api/auth/status")).text).projectMemory;
+    assert.equal(status.state, "unavailable"); assert.equal(status.ready, false);
+    assert.ok(!JSON.stringify(status).includes("private"));
+    const result = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+    assert.equal(result.status, code === "PROJECT_MEMORY_BUSY" ? 409 : 503);
+    assert.ok(!result.text.includes("private"));
+  }
+});
+
+test("Project Code Memory status failure is isolated and installer errors are sanitized", async (t) => {
+  const { api } = await fixture(t, { projectMemory: { getStatus: async () => { throw new Error("private fs"); }, install: async () => { throw Object.assign(new Error("private output"), { code: "PROJECT_MEMORY_CONFLICT" }); } } });
+  const status = JSON.parse((await api("/api/auth/status")).text);
+  assert.equal(status.projectMemory.state, "unavailable");
+  const result = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+  assert.equal(result.status, 409); assert.ok(!result.text.includes("private"));
+});
+
 test("setup endpoints share loopback/Host/nonce/Origin/JSON/OPTIONS and bounded empty-object guards", async (t) => {
   let writes = 0;
   const { api, port, router, nonce } = await fixture(t, { setup: {
-    getStatus: async () => ({ claudeCli: { ready: true } }),
-    configureCli: async () => { writes++; return { success: true }; }
-  } });
-  const routes = ["/api/auth/claude/configure"];
+    getStatus: async () => ({ claudeCli: { ready: true }, statusline: { ready: true } }),
+    configureCli: async () => { writes++; return { success: true }; },
+    configureStatusline: async () => { writes++; return { success: true }; }
+  }, macosService: { configure: async () => { writes++; return { status: 200, body: { state: "already_registered" } }; } } });
+  const routes = ["/api/auth/claude/configure", "/api/auth/statusline/configure", "/api/auth/macos/service/configure"];
   for (const [index, route] of routes.entries()) {
     for (const headers of [{ "X-Auth-Nonce": "wrong" }, { Host: `evil.example:${port}` }, { Origin: "https://evil.example" }, { "Content-Type": "text/plain" }]) {
       assert.equal((await api(route, { method: "POST", body: "{}", headers })).status, 403);
     }
     assert.equal((await request(port, route, { method: "POST", body: "{}" })).status, 403);
     assert.equal((await api(route, { method: "OPTIONS" })).status, 405);
+    assert.equal((await api(route, { method: "GET" })).status, 404);
     for (const body of ["[]", "null", "invalid", '{"path":"private-path"}', '{"__proto__":{}}']) {
       const result = await api(route, { method: "POST", body });
       assert.equal(result.status, 400);
@@ -194,7 +262,7 @@ test("setup endpoints share loopback/Host/nonce/Origin/JSON/OPTIONS and bounded 
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(result.headers["access-control-allow-origin"], undefined);
   }
-  assert.equal(writes, 1);
+  assert.equal(writes, 3);
 });
 
 test("HTTP setup rejects absent credentials, returns safe status and concurrently preserves both updates", async (t) => {
@@ -202,8 +270,9 @@ test("HTTP setup rejects absent credentials, returns safe status and concurrentl
   let catalogs = 0;
   const { api, store } = await fixture(t, { env: {}, setupFactory: (store) => {
     configRoot = path.join(store.directory, "cli");
-    return createClaudeSetup({ configRoot, store, env: {}, probe: async () => ({ cli: true }),
-      getAvailableModels: async () => { catalogs++; return { data: [{ id: "gpt-test" }] }; } });
+    return createClaudeSetup({ configRoot, store, env: {}, probe: async () => ({ cli: true, bash: "/bin/bash", jq: "test-jq", node: process.execPath }),
+      getAvailableModels: async () => { catalogs++; return { data: [{ id: "gpt-test" }] }; },
+      installer: { validateBundle() {}, deploy: () => ({ command: "local-statusline" }), cleanup() {}, isConfigured: (value) => value?.command === "local-statusline" } });
   } });
   const status = await api("/api/auth/status");
   assert.equal(JSON.parse(status.text).claudeCli.ready, false);
@@ -212,7 +281,7 @@ test("HTTP setup rejects absent credentials, returns safe status and concurrentl
   assert.equal(fs.existsSync(configRoot), false);
   store.saveLogin("openai", { type: "api_key", key: "private-upstream-key" });
   assert.equal(JSON.parse((await api("/api/auth/status")).text).claudeCli.ready, true);
-  const results = await Promise.all(["claude", "claude"].map((name) => api(`/api/auth/${name}/configure`, { method: "POST", body: "{}" })));
+  const results = await Promise.all(["claude", "statusline"].map((name) => api(`/api/auth/${name}/configure`, { method: "POST", body: "{}" })));
   for (const result of results) {
     assert.equal(result.status, 200);
     assert.equal(JSON.parse(result.text).success, true);
@@ -221,16 +290,75 @@ test("HTTP setup rejects absent credentials, returns safe status and concurrentl
   }
   const saved = JSON.parse(fs.readFileSync(path.join(configRoot, "settings.json"), "utf8"));
   assert.equal(saved.env.ANTHROPIC_MODEL, "claude-gateway/gpt-test");
+  assert.equal(saved.statusLine.command, "local-statusline");
 });
 
 test("setup errors hide raw command output, settings values and invalid conflict fields", async (t) => {
   const { api } = await fixture(t, { setup: { configureCli() { throw Object.assign(new Error("private-command-output"), {
     setupCode: "conflict", fields: ["apiKeyHelper", "private-helper-value"]
-  }); } } });
+  }); }, configureStatusline() { throw new Error("private-settings-content"); } } });
   const cli = await api("/api/auth/claude/configure", { method: "POST", body: "{}" });
   assert.equal(cli.status, 409);
   assert.deepEqual(JSON.parse(cli.text).fields, ["apiKeyHelper"]);
   assert.ok(!cli.text.includes("private-"));
+  const statusline = await api("/api/auth/statusline/configure", { method: "POST", body: "{}" });
+  assert.equal(statusline.status, 503);
+  assert.ok(!statusline.text.includes("private-"));
+});
+
+test("macOS service status is allowlisted and configure activates only after response finish", async (t) => {
+  let activated = 0;
+  let cancelled = 0;
+  const service = {
+    async getStatus() { return { supported: true, ready: true, registered: false, running: false, state: "ready", reason: "Safe", secret: "private", instance: { pid: 12, installationId: "a".repeat(64), secret: "hidden" }, operation: { id: "op-1", phase: "pending", internal: "hidden" } }; },
+    async configure() { return { status: 202, body: { accepted: true, operationId: "op-1", state: "pending", message: "Working", secret: "hidden" }, activate() { activated += 1; }, cancel() { cancelled += 1; } }; }
+  };
+  const { api } = await fixture(t, { macosService: service });
+  const status = await api("/api/auth/status");
+  assert.deepEqual(JSON.parse(status.text).macosService, { supported: true, ready: true, registered: false, running: false, state: "ready", reason: "Safe", instance: { pid: 12, installationId: "a".repeat(64) }, operation: { id: "op-1", phase: "pending" } });
+  assert.equal(status.text.includes("private"), false);
+  assert.equal((await api("/api/auth/macos/service/configure", { method: "POST", body: '{"extra":true}' })).status, 400);
+  const accepted = await api("/api/auth/macos/service/configure", { method: "POST", body: "{}" });
+  assert.equal(accepted.status, 202);
+  assert.doesNotMatch(accepted.text, /hidden/);
+  assert.equal(activated, 1);
+  assert.equal(cancelled, 0);
+  const missing = await fixture(t, {});
+  assert.equal(JSON.parse((await missing.api("/api/auth/status")).text).macosService.supported, false);
+  assert.equal((await missing.api("/api/auth/macos/service/configure", { method: "POST", body: "{}" })).status, 503);
+});
+
+test("macOS handoff is cancelled when the client disconnects during helper preparation", async (t) => {
+  let prepared;
+  let announce;
+  const started = new Promise((resolve) => { announce = resolve; });
+  let activated = 0;
+  let cancelled = 0;
+  const { port, nonce } = await fixture(t, { macosService: { configure: () => new Promise((resolve) => { prepared = resolve; announce(); }) } });
+  const req = http.request({ hostname: "127.0.0.1", port, path: "/api/auth/macos/service/configure", method: "POST", headers: {
+    "X-Auth-Nonce": nonce, Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json"
+  } });
+  const disconnected = new Promise((resolve) => req.once("error", resolve));
+  req.end("{}");
+  await started;
+  req.destroy(new Error("synthetic disconnect"));
+  await disconnected;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  prepared({ status: 202, body: { accepted: true, operationId: "op-aborted", state: "pending" }, activate() { activated++; }, cancel() { cancelled++; } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(activated, 0);
+  assert.equal(cancelled, 1);
+});
+
+test("non-mac service registration and raw subprocess failures produce fixed safe errors", async (t) => {
+  const { createMacosService } = require("../lib/macos-service");
+  const other = await fixture(t, { macosService: createMacosService({ platform: "win32", env: {} }) });
+  assert.equal(JSON.parse((await other.api("/api/auth/status")).text).macosService.supported, false);
+  assert.equal((await other.api("/api/auth/macos/service/configure", { method: "POST", body: "{}" })).status, 400);
+  const broken = await fixture(t, { macosService: { configure() { throw new Error("private-subprocess-secret"); } } });
+  const result = await broken.api("/api/auth/macos/service/configure", { method: "POST", body: "{}" });
+  assert.equal(result.status, 503);
+  assert.doesNotMatch(result.text, /private-subprocess/);
 });
 
 test("bounded bodies, malformed JSON and corrupt stores produce fixed safe errors", async (t) => {

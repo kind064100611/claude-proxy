@@ -1,61 +1,64 @@
 # claude-proxy
 
-本机运行的 Claude Code 网关，通过 ChatGPT / Codex 设备授权或 OpenAI API key 调用 GPT，通过 GitHub Copilot 设备授权调用 Claude。提供动态模型目录、本机登录页面、受保护的 Claude CLI 路由配置、工具/图片转换、流式响应、Observation Pack 和完整缓存兼容逻辑。
+A local gateway for Claude Code. Access GPT through ChatGPT / Codex device authorization or an OpenAI API key, and access Claude through GitHub Copilot device authorization. Includes dynamic model discovery, a local login page, protected Claude CLI routing and Statusline setup, optional current-user macOS service registration, guarded Project Code Memory skill installation, tool and image conversion, streaming responses, Observation Pack, and comprehensive cache compatibility.
 
-## 目录
+## Contents
 
-- [用途与架构](#用途与架构)
-- [前置条件](#前置条件)
-- [启动代理](#启动代理)
-- [登录与凭据](#登录与凭据)
-- [配置 Claude CLI](#配置-claude-cli)
-- [模型选择与 API](#模型选择与-api)
-- [流式、工具、图片与推理](#流式工具图片与推理)
-- [缓存行为](#缓存行为)
+- [Overview and architecture](#overview-and-architecture)
+- [Prerequisites](#prerequisites)
+- [Starting the proxy](#starting-the-proxy)
+- [Login and credentials](#login-and-credentials)
+- [Configuring Claude CLI](#configuring-claude-cli)
+- [Configuring Statusline](#configuring-statusline)
+- [Registering a macOS service](#registering-a-macos-service)
+- [Installing Project Code Memory](#installing-project-code-memory)
+- [Model selection and API](#model-selection-and-api)
+- [Streaming, tools, images, and reasoning](#streaming-tools-images-and-reasoning)
+- [Cache behavior](#cache-behavior)
 - [Observation Pack](#observation-pack)
-- [环境变量](#环境变量)
-- [安全与故障排查](#安全与故障排查)
-- [离线测试](#离线测试)
-- [许可证](#许可证)
+- [Environment variables](#environment-variables)
+- [Security and troubleshooting](#security-and-troubleshooting)
+- [Offline tests](#offline-tests)
+- [License](#license)
 
-## 用途与架构
+## Overview and architecture
 
 ```text
-Claude Code / Anthropic Messages 客户端
+Claude Code / Anthropic Messages client
                     │
              127.0.0.1:8082
                     │
           POST /v1/messages
-           ┌────────┴────────┐
-           │                 │
-       GPT 系列          Claude 系列
-   OpenAI Responses    原生 Anthropic Messages
-           │                 │
- OpenAI API 或 Codex     GitHub Copilot
+           ┌────────┴─────────────┐
+           │                      │
+       GPT models             Claude models
+   OpenAI Responses      Native Anthropic Messages
+           │                      │
+ OpenAI API or Codex        GitHub Copilot
 ```
 
-- GPT 请求转换为 Responses API，响应转换回 Anthropic Messages / SSE。
-- Claude 请求经 Copilot 的原生 Messages 接口转发，保留其 thinking、签名、工具事件与 cache usage。
-- `/v1/models` 合并当前凭据可访问的两个动态目录，不内置静态账号模型列表。
-- `/login` 只管理本机设备授权与 CLI 路由设置，不收集账号密码。
-- 项目使用 CommonJS 与 Node.js 内置模块，无构建步骤、无 npm 运行时依赖。
+- GPT requests are converted to the Responses API, and responses are converted back to Anthropic Messages / SSE.
+- Claude requests use Copilot's native Messages endpoint, preserving thinking, signatures, tool events, and cache usage.
+- `/v1/models` merges the two dynamic catalogs available to the current credentials. There is no bundled static account model list.
+- `/login` manages local device authorization, CLI routing, Statusline setup, optional macOS service registration, and Project Code Memory installation. It does not collect account passwords.
+- The proxy uses CommonJS and Node.js built-in modules. The bundled MIT Claude HUD runtime is ESM; there is no build step or npm runtime dependency.
 
-源码布局：`lib/` 为提供商、登录、安全存储、配置和缓存模块，`web/login.html` 为本机页面，`mac/` 与 `windows/` 为平台代理与启动脚本，`scripts/` 为功能开关，`test/` 为离线测试。两个 `proxy.js` 内容相同。
+Source layout: `lib/` contains provider, login, secure storage, setup, and cache modules; `web/login.html` is the local page; `mac/` and `windows/` contain platform proxies and launchers; `scripts/` contains feature-toggle utilities; and `test/` contains offline tests. The two `proxy.js` files are identical.
 
-## 前置条件
+## Prerequisites
 
-1. **Node.js 18.17 或更新版本**，推荐使用当前受支持的 Node.js LTS。需要内置 `fetch`、Web Streams、`structuredClone` 等能力。
-2. 使用 CLI 配置按钮时，须先安装 **Claude Code**，并确保 CLI 可被版本探测找到。网关不会自动安装 CLI。
-3. 至少具备一种上游访问权限：
-   - ChatGPT 账号允许 Codex 设备授权及相应模型访问；或具备 OpenAI API key 和 API 额度。
-   - GitHub 账号具备 Copilot 权限，且允许调用所选 Claude 模型。
-4. 网络可访问相应官方授权与 API 服务，本机端口 **8082** 空闲。
+1. **Node.js 18.17 or newer.** A currently supported Node.js LTS release is recommended. The implementation requires built-in `fetch`, Web Streams, `structuredClone`, and related APIs.
+2. To use the CLI configuration button, install **Claude Code** first and ensure the CLI can be found by the version probe. The gateway does not install it automatically.
+3. At least one type of upstream access:
+   - A ChatGPT account that supports Codex device authorization and the requested models, or an OpenAI API key with API quota.
+   - A GitHub account with Copilot access and permission to use the selected Claude model.
+4. Network access to the relevant official authorization and API services, and an available local port **8082**.
 
-账号登录成功不等于所有模型均有权限。订阅、组织策略、模型启用状态、地区与额度均由上游决定；网关不会绕过这些限制。ChatGPT 订阅和 OpenAI API 计费属于不同访问方式。
+Successful login does not grant access to every model. Subscriptions, organization policies, model availability, regions, and quotas are controlled by the upstream service; the gateway does not bypass these restrictions. ChatGPT subscriptions and OpenAI API billing are separate access methods.
 
-## 启动代理
+## Starting the proxy
 
-以下命令均在项目根目录运行。
+Run the following commands from the project root.
 
 ### macOS / Linux
 
@@ -64,13 +67,13 @@ node --version
 bash mac/start-proxy.sh
 ```
 
-也可以直接运行：
+Or run the proxy directly:
 
 ```bash
 node mac/proxy.js
 ```
 
-脚本以前台方式运行代理，保持该终端打开；按 `Ctrl+C` 停止。启动后打开：
+The launcher runs the proxy in the foreground. Keep the terminal open and press `Ctrl+C` to stop it. Then open:
 
 ```text
 http://127.0.0.1:8082/login
@@ -78,85 +81,85 @@ http://127.0.0.1:8082/login
 
 ### Windows
 
-在命令提示符中运行：
+From Command Prompt:
 
 ```bat
 node --version
 windows\start-proxy.bat
 ```
 
-批处理使用 `start /min node` 启动独立进程。若需查看日志或明确停止代理，推荐在前台运行：
+The batch launcher uses `start /min node` to start a separate process. To view logs and stop the proxy explicitly, run it in the foreground instead:
 
 ```bat
 node windows\proxy.js
 ```
 
-同样打开 `http://127.0.0.1:8082/login`。启动脚本不安装服务、不修改 CLI settings；初始化设置由页面按钮显式执行。
+Open `http://127.0.0.1:8082/login`. The launchers do not install services or modify CLI settings; configuration is performed explicitly through the page button.
 
-代理固定监听 `127.0.0.1:8082`，没有端口或远程监听环境变量。无需同时启动两份平台代理。
+The proxy listens only on `127.0.0.1:8082`. There is no environment variable for changing the port or enabling a remote listener. Do not start both platform proxies at once.
 
-## 登录与凭据
+## Login and credentials
 
-### ChatGPT / Codex 设备授权
+### ChatGPT / Codex device authorization
 
-1. 在 `/login` 点击 **Login ChatGPT**。
-2. 复制设备码，打开页面给出的官方 OpenAI 授权链接。
-3. 在 `https://auth.openai.com/codex/device` 完成授权。仅在官方页面输入账号密码。
-4. 返回本机页面，等待轮询状态显示完成。到期或失败时重新发起登录。
+1. Click **Login ChatGPT** on `/login`.
+2. Copy the device code and open the official OpenAI authorization link shown on the page.
+3. Complete authorization at `https://auth.openai.com/codex/device`. Enter your account password only on the official website.
+4. Return to the local page and wait for polling to report completion. Start again if the code expires or authorization fails.
 
-当前设备登录写入 `openai-codex` 凭据。运行时自动刷新过期凭据，Codex 请求使用 token 中的 ChatGPT account ID。
+Device login stores an `openai-codex` credential. Expired credentials are refreshed automatically at runtime, and Codex requests use the ChatGPT account ID from the token.
 
-### GitHub Copilot 设备授权
+### GitHub Copilot device authorization
 
-1. 点击 **Login Copilot**，复制设备码。
-2. 在 `https://github.com/login/device` 完成 GitHub 授权。
-3. 本机页面轮询流程；授权后校验 Copilot 访问能力并保存凭据。
+1. Click **Login Copilot** and copy the device code.
+2. Complete GitHub authorization at `https://github.com/login/device`.
+3. The local page polls the flow. After authorization, the proxy validates Copilot access and saves the credentials.
 
-GitHub 登录 token 与短期 Copilot API token 的交换由代理完成。Copilot Claude 模型仍受账号和组织策略控制，目录可能为空。
+The proxy exchanges the GitHub login token for a short-lived Copilot API token. Copilot Claude models remain subject to account and organization policies, and the catalog may be empty.
 
-### OpenAI API key 环境覆盖
+### OpenAI API key environment override
 
-可在启动代理的进程环境中设置 `OPENAI_API_KEY`。此方式优先于存储的 ChatGPT 凭据，不通过网页保存，也不写入 Claude settings。
+Set `OPENAI_API_KEY` in the process environment before starting the proxy. It takes precedence over stored ChatGPT credentials, is not saved through the web page, and is not written to Claude settings.
 
 ```bash
-# 值仅为占位符；使用你自己的安全环境注入方式。
+# This is a placeholder. Use your own secure environment-injection method.
 OPENAI_API_KEY='<your-api-key>' node mac/proxy.js
 ```
 
-不要把真实 key 写进仓库、截图或共享命令历史。Windows 可通过当前终端或系统的环境变量管理方式设置，再启动代理。修改环境变量后需要重新启动代理。
+Do not put real keys in the repository, screenshots, or shared command history. On Windows, set the variable in the current terminal or through the system environment-variable settings before starting the proxy. Restart the proxy after changing its environment variables.
 
-### 凭据位置与导入
+### Credential storage and import
 
-默认存储为：
+The default store is:
 
 ```text
 ~/.claude/claude-proxy/auth.json
 ```
 
-仅存储 `openai`、`openai-codex`、`github-copilot` 对应的认证数据；refresh token 更新保留现有格式，并用 refresh token 与 `loginVersion` 防止旧刷新覆盖新登录。新登录会替换该提供商的旧登录字段，保留其他提供商。
+It stores authentication data for `openai`, `openai-codex`, and `github-copilot`. Refresh-token updates preserve the existing format and check both the refresh token and `loginVersion` to prevent an older refresh from overwriting a newer login. A new login replaces that provider's previous login fields while preserving other providers.
 
-在支持 Unix 权限的平台，目录为 `0700`、文件为 `0600`，使用同目录临时文件和原子发布。Windows 应同时依赖账号隔离与文件 ACL，不能将 Unix mode 当作完整的访问控制。
+On platforms with Unix permissions, the directory uses `0700` and the file uses `0600`. Updates use temporary files in the same directory and atomic publication. On Windows, also rely on account isolation and file ACLs; Unix mode values are not a complete access-control mechanism.
 
-如需从已有 Pi 认证文件导入，请显式提供 `PI_AUTH_FILE`：
+To import an existing Pi authentication file, explicitly provide `PI_AUTH_FILE`:
 
 ```bash
 PI_AUTH_FILE='/path/to/pi/auth.json' node mac/proxy.js
 ```
 
-启动时仅在目标 `auth.json` 不存在时导入受支持凭据；来源文件只读，不修改、不删除。目标存在或损坏时不覆盖，冲突会给出提示；无效来源或不受支持的条目不会被当作有效凭据。没有 `PI_AUTH_FILE` 时不查找仓库内的认证文件。
+At startup, supported credentials are imported only if the destination `auth.json` does not exist. The source is read-only: it is neither modified nor deleted. Existing or damaged destinations are never overwritten, and conflicts produce a warning. Invalid sources and unsupported entries are not treated as valid credentials. Without `PI_AUTH_FILE`, the proxy does not search for authentication files in the repository.
 
-模块导入不会创建凭据目录或迁移文件。`CLAUDE_CONFIG_DIR` 不改变凭据根目录；它只影响 CLI settings 与备份位置。
+Importing a module does not create credential directories or migrate files. `CLAUDE_CONFIG_DIR` does not change the credential root; it selects the actual CLI root for settings, backups, Statusline deployments, and macOS service state/logs.
 
-## 配置 Claude CLI
+## Configuring Claude CLI
 
-1. 保持代理运行，先完成一种上游认证。
-2. 在 `/login` 确认 **Configure Claude CLI** 按钮可用，再点击。
-3. 代理验证 CLI 安装、凭据、配置结构及认证冲突，从动态目录选择与当前凭据匹配的可用模型。
-4. **重新打开终端**，运行 `claude`；在交互会话中使用 `/model` 切换。
+1. Keep the proxy running and configure at least one upstream authentication method first.
+2. On `/login`, wait until **Configure Claude CLI** is enabled, then click it.
+3. The proxy validates the CLI installation, credentials, settings structure, and authentication conflicts, then selects an available model from the dynamic catalog that matches the current credentials.
+4. **Open a new terminal** and run `claude`. Use `/model` in an interactive session to switch models.
 
-默认读取 `~/.claude/settings.json`；设置 `CLAUDE_CONFIG_DIR` 时读取该目录的实际 `settings.json`，支持 `~` 路径展开。代理读取模型配置时使用 mtime 缓存，修改 settings 后会在后续请求重新读取。
+The default settings file is `~/.claude/settings.json`. When `CLAUDE_CONFIG_DIR` is set, the proxy uses the actual `settings.json` in that directory, with support for `~` expansion. Model settings are cached by mtime and reread on later requests when the file changes.
 
-配置按钮合并下列字段：
+The configuration button merges these fields:
 
 ```json
 {
@@ -166,26 +169,84 @@ PI_AUTH_FILE='/path/to/pi/auth.json' node mac/proxy.js
     "CLAUDE_CODE_USE_GATEWAY": "1",
     "CLAUDE_GATEWAY_ALLOW_LOOPBACK": "1",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-    "ANTHROPIC_MODEL": "<从当前动态目录选择的网关模型 ID>"
+    "ANTHROPIC_MODEL": "<gateway model ID selected from the current dynamic catalog>"
   }
 }
 ```
 
-`sk-placeholder` 只是本地路由占位值，不是上游 API key。操作会移除被替代的 `env.ANTHROPIC_AUTH_TOKEN`，保留其他 env、hooks、permissions、plugins、`model` 和已有 `statusLine` 等无关字段。已有可用的显式模型优先保留，否则选择与凭据匹配的目录首项；不会设置固定模型或子代理默认模型。
+`sk-placeholder` is a local routing placeholder, not an upstream API key. The operation removes the superseded `env.ANTHROPIC_AUTH_TOKEN` while preserving unrelated environment variables, hooks, permissions, plugins, `model`, and an existing `statusLine`. An existing explicit model is retained when available; otherwise, the first catalog entry matching the credentials is selected. No fixed model or subagent default is installed.
 
-设置原始字节（包括 BOM 与格式）在写入前备份至：
+Before writing, the original settings bytes, including any BOM and formatting, are backed up to:
 
 ```text
-<实际 CLI 配置目录>/claude-proxy/settings-backups/settings-<SHA-256>.json
+<actual CLI config directory>/claude-proxy/settings-backups/settings-<SHA-256>.json
 ```
 
-备份目录为私有目录，备份文件为私有常规文件。操作串行执行，在提交前重读最新设置、重新检查冲突并合并，使用临时文件原子更新。损坏配置、符号链接、目录型目标、过大文件、不安全备份路径或不可写目标均被拒绝。
+The backup directory and regular backup files are private. Configuration operations run serially, reread the latest settings before committing, recheck conflicts, merge changes, and update atomically through a temporary file. Damaged settings, symbolic links, directory targets, oversized files, unsafe backup paths, and unwritable targets are rejected.
 
-如存在 `apiKeyHelper`、`proxyAuthHelper`、强制登录设置、其他云认证模式或 gateway helper 等冲突，需用户手动处理；按钮不会擅自删除它们。shell、项目、local 和 managed 配置仍可能覆盖用户 settings。代理不读取或写入 Claude 的 `.credentials.json`。
+Conflicts such as `apiKeyHelper`, `proxyAuthHelper`, forced login settings, other cloud authentication modes, or gateway helpers must be resolved manually; the button does not silently delete them. Shell, project, local, and managed settings may still override user settings. The proxy does not read or write Claude's `.credentials.json`.
 
-**启动代理、导入模块、打开页面、查询状态均不会写入 CLI settings。** 唯有带本机 nonce、同源 JSON 且 body 为 `{}` 的 `POST /api/auth/claude/configure` 会执行配置。若需恢复，先停止使用网关，再检查相应私有备份，手动恢复需要的字段；不要直接覆盖已经新增的个人设置。
+**Starting the proxy, importing modules, opening the page, and querying status do not write CLI settings.** Configuration runs only through a local nonce-protected, same-origin JSON `POST /api/auth/claude/configure` with a body of `{}`. To restore settings, first stop using the gateway, inspect the relevant private backup, and restore the required fields manually. Do not overwrite personal settings added since the backup.
 
-## 模型选择与 API
+## Configuring Statusline
+
+**Configure Statusline** on `/login` is independent of ChatGPT / Copilot login and CLI routing. It requires a discoverable Claude CLI, **Bash 3+**, **jq 1.6+**, and **Node.js 18+**. On Windows, install Git Bash and jq manually. Missing dependencies are never downloaded automatically.
+
+Clicking the button explicitly **replaces the existing `statusLine` command**. The original settings bytes are backed up to the same private `settings-backups/` directory described above. Gateway environment variables, authentication, hooks, permissions, and unrelated plugins remain unchanged. The operation accepts only an empty JSON object at `POST /api/auth/statusline/configure` under the local page's security guards.
+
+The bundled MIT Claude HUD runtime and cache display are deployed into:
+
+```text
+<actual CLI config directory>/claude-proxy/statusline/<generation SHA-256>/
+```
+
+Each immutable generation includes the complete HUD runtime, its own display config/cache directory, the adapted wrapper, and a launcher that quotes the probed Node/Bash/jq paths. Dependency paths participate in the generation identity. Repeated installs verify deployed runtime bytes before reuse; changed or unsafe generations are not silently overwritten. Settings are committed only after successful deployment. If saving fails, cleanup removes only a newly created deployment that is not referenced by the latest settings; reused generations remain intact.
+
+The deployed Statusline works independently after moving this repository, provided the selected executables remain available. Its HUD config/cache is isolated without hiding the actual Claude CLI config root. It displays warm/dropped/hit cache information from statusline input; upstream cache availability is not guaranteed. Refresh the Statusline or open a new Claude session after configuring. See [Statusline provenance](statusline/SOURCE.md) and [HUD MIT license](statusline/claude-hud/LICENSE). The personal non-runtime wrapper archive is not included.
+
+## Registering a macOS service
+
+On macOS, `/login` shows an independent **Register macOS Service** button. It requires a normal current-user GUI login session, safe writable directories, and available Node/repository paths. It creates a **LaunchAgent**, never a system LaunchDaemon and never using `sudo`. Windows and other platforms report this feature as unsupported; the card follows the backend platform, not the browser's platform.
+
+```text
+Label: com.shanshazhe.claude-proxy
+Plist: $HOME/Library/LaunchAgents/com.shanshazhe.claude-proxy.plist
+State/log root: <actual CLI config directory>/claude-proxy/macos-service/
+Logs: stdout.log, stderr.log
+```
+
+Registration is explicit through a protected `{}` `POST /api/auth/macos/service/configure`. Importing modules, starting the proxy, opening the page, or querying status never registers a service or writes service files; status may run bounded, read-only service checks. A matching running job is a no-op. A matching stopped plist is reused byte-for-byte. Conflicting installations, disabled jobs, unsafe files, or incompatible settings require manual repair and are never overwritten. This identity is separate from the source toolkit's service.
+
+**Immediate handoff can interrupt active requests and login flows.** The detached helper must be ready before HTTP 202, and activation waits until the response finishes; a client disconnect during preparation cancels handoff without stopping the original proxy. The original proxy drains for at most 10 seconds. The helper checks the old PID/birth identity and port release before bootstrap, then verifies launchd ownership, the listening socket, the page nonce, the operation ID, and installation identity. `/health` alone is not proof of successful registration.
+
+The page polls the operation and reconnects with a fresh same-origin nonce. **An interrupted/lost POST is never automatically repeated.** If the result cannot be confirmed, inspect status before retrying. Failed registration reports whether the original proxy was `recovered` or `recovery_failed`; the latter requires manually starting `bash mac/start-proxy.sh` and inspecting the service. Recovery secrets stay in IPC/memory, not the plist, operation records, or logs.
+
+New plists transfer only validated cache switches (`OPENAI_PROMPT_CACHE`, `CLAUDE_PROMPT_CACHE`, `DISABLE_PROMPT_CACHING`, and the HAIKU/SONNET/OPUS variants), `PI_CACHE_RETENTION`, `CODEX_CLIENT_VERSION`, the selected CLI root, and supported safe TLS/certificate options. They do not copy arbitrary shell environment variables. **Environment-only `OPENAI_API_KEY`, `PI_AUTH_FILE`, custom `OPENAI_BASE_URL`, insecure TLS, arbitrary `NODE_OPTIONS`/Node arguments, and verbose prompt logging prevent handoff.** Save supported credentials to the local store and remove unsupported overrides before restarting the proxy manually. A running-service no-op does not modify its environment.
+
+The service depends on absolute Node and repository paths. Moving either requires manual repair; do not overwrite another installation's plist or blindly delete service state. Service logs may contain operational or model-request information: keep them private and inspect them before sharing.
+
+## Installing Project Code Memory
+
+**Install Project Code Memory** on `/login` installs the bundled code-memory skill independently of proxy login, CLI routing, Statusline, and macOS service registration. It requires an installed **Claude CLI** and **CPython 3.9+** with its standard library. Windows Python and the `py -3` launcher are supported by fixed, shell-free `-I -B` probes; automatic interpreter installation is explicitly disabled. Missing dependencies must be installed manually.
+
+Installation is an explicit, local nonce-protected `{}` `POST /api/auth/project-memory/install`. The bundle is pinned to upstream commit `7dc7b0dad137fa8e1e65af31143f4ead8109ca03` and validated against its manifest. Only these files are deployed:
+
+```text
+<actual CLI config directory>/skills/project-code-memory/
+  SKILL.md
+  scripts/pcm.py
+  references/record-format.md
+  LICENSE
+  SOURCE.md
+```
+
+The actual CLI root defaults to `~/.claude` and follows `CLAUDE_CONFIG_DIR`. The installer uses a serialized per-root queue, an exclusive `.project-code-memory-install.lock`, and private `.project-code-memory-stage-*` staging under `<actual CLI config directory>/claude-proxy/`. It creates the target exclusively and publishes `SKILL.md` last through an atomic, no-overwrite hard link. It never steals a lock on timeout; abandoned locks require manual inspection. On failure, cleanup removes only unchanged files/inodes and empty directories created by that attempt, retaining external edits and extras.
+
+An identical complete deployed skill or matching pinned upstream core is a **read-only no-op**, preserving existing `.git`, caches, extras, and directory permissions. Different, partial, symlinked, or unsafe installations are refused rather than replaced. The installer does not execute `pcm.py`, create project caches, edit `.gitignore`, settings, hooks, or CLAUDE.md, or download code. Import, startup, status, and page load never install anything. Damaged CLI settings and absent proxy credentials do not block this independent feature.
+
+**Open a new Claude session after installation.** Invoke `/project-code-memory` explicitly or allow the model to select it. This is model-driven guidance, not a hook. A later `query` intentionally creates the selected project's `projectCodeMemory/` cache, adds its ignore rule, and may prune stale records. Installing the skill does not perform that query. See the [bundled README](project-code-memory/README.md), [provenance](project-code-memory/SOURCE.md), and [MIT license](project-code-memory/LICENSE). The upstream Python implementation, reference, optional Codex agent metadata, and upstream tests are retained in the repository; only the five files above are installed.
+
+## Model selection and API
 
 ```bash
 curl http://127.0.0.1:8082/health
@@ -193,11 +254,11 @@ curl http://127.0.0.1:8082/v1/models
 curl http://127.0.0.1:8082/features
 ```
 
-目录返回 `claude-gateway/<模型 ID>`；适用模型可能带 `[1m]` 扩展上下文标记，转发前会去除该后缀。标记不是对账号实际上下文额度的承诺，上游能力仍以账号目录和请求结果为准。
+The catalog returns `claude-gateway/<model ID>`. Eligible models may include a `[1m]` extended-context marker, which is removed before forwarding. This marker is not a guarantee of the account's actual context allowance; upstream capabilities depend on the account catalog and request results.
 
-直接请求可使用目录中的完整网关 ID，也可使用明确的 GPT / Claude 原始 ID。`sonnet`、`opus`、`haiku`、`default` 等 CLI 短别名使用 settings 中的配置模型。没有配置默认模型时应发送明确模型 ID。其他模型类型返回 HTTP 400，不会被转发到错误提供商。
+Requests may use the full gateway ID from the catalog or an explicit raw GPT / Claude model ID. CLI aliases such as `sonnet`, `opus`, `haiku`, and `default` use the model configured in settings. Send an explicit model ID if no default is configured. Other model types return HTTP 400 instead of being routed to the wrong provider.
 
-从 `/v1/models` 复制一个当前账号可用的 GPT ID，替换下例的 `gpt-<available-id>`：
+Copy a GPT model ID available to your account from `/v1/models` and replace `gpt-<available-id>` below:
 
 ```bash
 curl http://127.0.0.1:8082/v1/messages \
@@ -207,75 +268,78 @@ curl http://127.0.0.1:8082/v1/messages \
     "model": "claude-gateway/gpt-<available-id>",
     "max_tokens": 256,
     "stream": false,
-    "messages": [{"role":"user","content":"用一句话解释这个网关的用途。"}]
+    "messages": [{"role":"user","content":"Explain the purpose of this gateway in one sentence."}]
   }'
 ```
 
-对 Claude，将 `model` 替换为目录中的 `claude-gateway/claude-...`。流式请求使用相同 body，将 `stream` 设为 `true`，并为 curl 加 `-N`。Windows PowerShell 建议使用 `curl.exe` 并将 body 存入自己创建的 JSON 文件，以避免 shell 引号差异。
+For Claude, replace `model` with a `claude-gateway/claude-...` entry from the catalog. To stream, use the same body with `stream` set to `true` and add `-N` to curl. In Windows PowerShell, use `curl.exe` and save the body to a JSON file you create yourself to avoid shell quoting differences.
 
-主要端点：
+Main endpoints:
 
-| 方法与路径 | 用途 |
+| Method and path | Purpose |
 | --- | --- |
-| `GET /health` | 进程存活检查，不代表上游权限可用 |
-| `GET /v1/models` | 两个提供商的动态网关目录，支持 query 参数访问 |
-| `POST /v1/messages` | Anthropic Messages 输入，JSON 或 SSE 输出 |
-| `GET /features` | Observation Pack 当前开关状态，只读 |
-| `GET /login` | 本机账户和 CLI 配置页面 |
-| `GET /api/auth/status` | nonce 保护的凭据/CLI 状态，不返回 token |
-| `POST /api/auth/chatgpt/start` | 发起 ChatGPT 设备授权，页面发送 `{}` |
-| `POST /api/auth/copilot/start` | 发起 Copilot 设备授权，页面发送 `{}` |
-| `GET /api/auth/flow/<id>` | 设备流程状态快照 |
-| `POST /api/auth/claude/configure` | 受保护的空对象配置请求 |
+| `GET /health` | Process liveness; does not validate upstream access |
+| `GET /v1/models` | Dynamic gateway catalog from both providers; accepts requests with query parameters |
+| `POST /v1/messages` | Anthropic Messages input with JSON or SSE output |
+| `GET /features` | Read-only Observation Pack status |
+| `GET /login` | Local account and CLI configuration page |
+| `GET /api/auth/status` | Nonce-protected credential / CLI / Statusline / service / Project Code Memory status; never returns tokens |
+| `POST /api/auth/chatgpt/start` | Starts ChatGPT device authorization; the page sends `{}` |
+| `POST /api/auth/copilot/start` | Starts Copilot device authorization; the page sends `{}` |
+| `GET /api/auth/flow/<id>` | Device-flow status snapshot |
+| `POST /api/auth/claude/configure` | Protected CLI configuration with an empty JSON object |
+| `POST /api/auth/statusline/configure` | Protected independent Statusline deployment with an empty JSON object |
+| `POST /api/auth/macos/service/configure` | Protected macOS registration; 200 for a running no-op, 202 for a prepared asynchronous operation |
+| `POST /api/auth/project-memory/install` | Protected independent skill installation with an empty JSON object |
 
-登录与配置端点应由 `/login` 操作，不能通过普通跨域 API 调用。提供的 Messages 接口不是完整 Anthropic API 实现，不应假设所有其他 Anthropic 端点均可用。
+Use `/login` for login and configuration operations; these endpoints do not support ordinary cross-origin API calls. The Messages endpoint is not a complete implementation of the Anthropic API. Do not assume other Anthropic endpoints are available.
 
-## 流式、工具、图片与推理
+## Streaming, tools, images, and reasoning
 
-- **GPT 非流式**：转换请求后收集 Responses 结果，映射 text、tool calls、stop reason 与 usage。Codex 上游即使必须使用 SSE，本地非流式客户端仍得到完整 JSON。
-- **GPT 流式**：发送 Anthropic `message_start`，实时转换 Responses 的文本、推理摘要与完整工具调用事件，最后发送 usage、`message_delta` 和 `message_stop`。等待期间发送 SSE keepalive，写入遵守背压；客户端真正断连时取消上游请求。
-- **Copilot Claude**：转发原生 Messages JSON 或 SSE，保留原始响应字节、签名、工具参数片段与错误事件，支持背压和客户端取消。
-- **工具**：映射 `tool_use` / `tool_result`，结果紧跟相应工具调用，随后才发送与结果一起附带的用户文本。上游输出工具调用后，真正的工具执行仍由客户端完成。
-- **图片**：GPT 的普通图片块转换为 Responses `input_image`；工具结果中的图片放入随后一条 multimodal user 消息。Copilot 接收原生图片结构并附带 vision 请求头。图片能力由所选模型和账号决定，无效来源会用说明文本替代。
-- **推理**：GPT 支持公开 reasoning summaries，不能把它当作原生 Claude 的完整 thinking/signature。回答正文中的字面 `<think>` 不会被误判为 GPT 推理块。Copilot 根据目录适配 adaptive thinking，保留原生签名及兼容性回退。
+- **Non-streaming GPT:** Converts the request, collects the Responses result, and maps text, tool calls, stop reasons, and usage. A local non-streaming client still receives complete JSON even when the Codex upstream requires SSE.
+- **Streaming GPT:** Sends Anthropic `message_start`, converts Responses text, reasoning summaries, and complete tool-call events as they arrive, then sends usage, `message_delta`, and `message_stop`. SSE keepalives are sent while waiting. Writes honor backpressure, and a genuine client disconnect cancels the upstream request.
+- **Copilot Claude:** Forwards native Messages JSON or SSE, preserving response bytes, signatures, tool-argument fragments, and error events, with backpressure and client cancellation.
+- **Tools:** Maps `tool_use` / `tool_result`. Results immediately follow their corresponding tool calls, before any user text supplied alongside them. The client remains responsible for executing tools requested by the upstream model.
+- **Images:** Ordinary GPT image blocks become Responses `input_image` items. Images in tool results are attached to a following multimodal user message. Copilot receives native image structures and a vision request header. Image support depends on the selected model and account; unsupported or invalid sources are replaced with explanatory text.
+- **Reasoning:** GPT supports public reasoning summaries, not native Claude's full thinking / signature protocol. Literal `<think>` text in an answer is not misclassified as a GPT reasoning block. Copilot adapts adaptive thinking using catalog capabilities while preserving native signatures and compatibility fallbacks.
 
-请求体上限为 32 MiB。OpenAI 请求总超时为 1 小时，收到上游响应头后连续 90 秒没有数据会取消；GPT SSE 每 10 秒尝试发送 keepalive。Copilot 请求总超时为 1 小时，行为与 OpenAI 的 idle timer 不完全相同。
+The request-body limit is 32 MiB. OpenAI requests have a one-hour total timeout and are canceled after 90 seconds without data once upstream response headers have arrived. GPT SSE attempts a keepalive every 10 seconds. Copilot requests also have a one-hour total timeout, but do not use the same idle-timer behavior as OpenAI.
 
-## 缓存行为
+## Cache behavior
 
-### GPT prompt cache 与统计
+### GPT prompt caching and statistics
 
-默认生成稳定的 `prompt_cache_key`：同一会话增长时尽量保持缓存身份，不同会话分离；system/tools 中移动的原生 cache 标记不会改变 fallback key。日志只输出 key/prefix 的哈希标识和 token 统计，不打印 prompt 或完整请求体。
+A stable `prompt_cache_key` is generated by default. It aims to preserve cache identity as a session grows while separating different sessions. Moving native cache annotations in system / tools does not change the fallback key. Logs contain only hashed key / prefix identifiers and token statistics, never prompts or full request bodies.
 
-Responses `input_tokens_details.cached_tokens` 转换为 Anthropic `usage.cache_read_input_tokens`，JSON 和 SSE 路径均保留；`input_tokens` 为扣除缓存读取部分后的普通输入量，`output_tokens` 保留上游输出量。日志可见总输入、缓存读取、未缓存输入和命中比例；上游未命中时数值可能为 0。key 稳定不保证缓存一定命中，缓存策略与费用由上游决定。
+Responses `input_tokens_details.cached_tokens` maps to Anthropic `usage.cache_read_input_tokens` in both JSON and SSE output. `input_tokens` reports regular input after subtracting cache reads, and `output_tokens` retains the upstream output count. Logs show total input, cache reads, uncached input, and the hit percentage; an upstream cache miss may report 0. A stable key does not guarantee a hit. Cache policy and billing are controlled by the upstream service.
 
-### Claude prompt cache 与统计
+### Claude prompt caching and statistics
 
-在没有显式顶层 `cache_control` 或禁用开关时，代理按已有标记和 TTL 顺序，为适用的 tools、system、最后 user 内容补充 `ephemeral` 标记；最多四个 block 标记，不覆盖已有标记。长/短缓存顺序及邻近 TTL 保持兼容。
+Unless an explicit top-level `cache_control` or a disable switch is present, the proxy adds `ephemeral` annotations to eligible tools, system content, and the last user content, respecting existing markers and TTL ordering. It allows at most four block markers and does not overwrite existing annotations. Long-before-short ordering and neighboring TTLs remain compatible.
 
-Copilot 原生 `cache_read_input_tokens`、`cache_creation_input_tokens` 等 usage 原样返回。独立 observer 观察 JSON/SSE 统计并立即转发原始字节；未知或过大的事件只跳过诊断，不改变响应。统计回调失败不会破坏原生响应。
+Copilot's native usage fields, including `cache_read_input_tokens` and `cache_creation_input_tokens`, are returned unchanged. A separate observer inspects JSON / SSE usage while immediately forwarding the original bytes. Unknown or oversized events skip diagnostics without changing the response, and a failing statistics callback does not interrupt native output.
 
-### Responses replay 与其他本地缓存
+### Responses replay and other local caches
 
-- Anthropic 客户端不能直接携带 Responses item IDs / encrypted reasoning。代理在**进程内存**保存与账号、模型、会话和历史匹配的原生输出，在后续轮次重放；不会把这些数据写入日志或磁盘。
-- Replay 有 512 项 / 16 MiB 上限并按最近使用淘汰；代理重启会清空，不与其他独立客户端随意混用。
-- 模型目录使用 pending 请求合并、单来源 12 秒上限、约 2.2 秒客户端返回预算。全部来源成功时 TTL 为 5 分钟，有来源失败时为 30 秒；失败来源保留曾成功获取的旧目录，首次失败则暂时缺席。
-- 登录成功会使目录 generation 失效；较早的 pending 发现不能重新填充当前缓存。
-- CLI settings 的模型读取缓存按 mtime 更新，与上游 prompt cache、Responses replay、Observation Pack 是不同机制。
+- Anthropic clients cannot directly carry Responses item IDs or encrypted reasoning. The proxy keeps matching native output in **process memory**, scoped to the account, model, session, and history, for replay on later turns. These data are not written to logs or disk.
+- Replay is limited to 512 entries / 16 MiB with least-recently-used eviction. Restarting clears it, and unrelated clients are not arbitrarily mixed.
+- Model discovery coalesces pending requests, limits each source to 12 seconds, and gives clients a response budget of approximately 2.2 seconds. The TTL is five minutes when every source succeeds and 30 seconds when a source fails. A failed source retains previously discovered entries; a source that has never succeeded remains absent.
+- Successful login invalidates the catalog generation. An older pending discovery cannot repopulate the current cache.
+- CLI model settings are cached by mtime. This is separate from upstream prompt caching, Responses replay, and Observation Pack.
 
 ## Observation Pack
 
-Observation Pack 对后续轮次的新大文本工具结果进行本地归档，将完整内容替换为包含 SHA-256、原文件路径、开头和结尾节选的提示；这是**节选而非摘要**。客户端可以使用原生 `Read` 的 `file_path` / `offset` / `limit` 取回完整证据，不能依据节选臆测中间内容。
+Observation Pack archives new large text tool results on later turns and replaces the full content with a notice containing its SHA-256, original file path, and beginning / ending excerpts. These are **excerpts, not summaries**. Clients can retrieve the complete evidence through native `Read` using `file_path`, `offset`, and `limit`; they must not infer missing content from excerpts.
 
-默认开启。开关固定在实际 HOME 下：
+It is enabled by default. The toggle always lives under the actual HOME:
 
 ```text
 ~/.claude/gateway-features.json
 ```
 
-启动时若该文件不存在，安全导入项目根目录 `gateway-features.json` 的有效原始字节，保留项目文件；已有用户开关优先。开关缺失时默认开，损坏或不安全时禁用新增打包。
+If this file is absent at startup, the proxy safely imports valid original bytes from the project-root `gateway-features.json`, retaining the project file. Existing user configuration takes precedence. A missing toggle defaults to enabled; damaged or unsafe configuration disables new packing.
 
-在项目根目录运行：
+From the project root:
 
 ```bash
 node scripts/toggle-observation-pack.js status
@@ -284,105 +348,111 @@ node scripts/toggle-observation-pack.js on
 curl http://127.0.0.1:8082/features
 ```
 
-`on` / `off` 是用户主动写入开关的命令；`status` 和 `GET /features` 只读。开关按请求热加载，无需重启；历史已发送的内容保持固定投影，关闭仅影响后续新结果，不恢复或改写已发送历史。
+`on` / `off` explicitly write the toggle. `status` and `GET /features` are read-only. The setting reloads per request without a restart. Previously sent history keeps its pinned projection: turning packing off affects new results only and does not restore or rewrite earlier history.
 
-归档固定在：
+Archives always live at:
 
 ```text
-~/.claude/gateway-observations/<会话身份 SHA-256>/
+~/.claude/gateway-observations/<session identity SHA-256>/
   state.json
-  <内容 SHA-256>.txt
+  <content SHA-256>.txt
 ```
 
-需客户端提供 `metadata.session_id` 或 `metadata.user_id`，以及具有 `file_path` 参数的 `Read` 工具；没有可靠会话身份不打包。首个已观察请求建立基线，后续满足条件的新结果才打包；阈值为 16 KiB，单结果最多 8 MiB，每会话归档最多 128 MiB，状态最多 4 MiB / 20,000 条。
+The client must supply `metadata.session_id` or `metadata.user_id` and a `Read` tool with a `file_path` parameter. Results are not packed without a reliable session identity. The first observed request establishes a baseline; only eligible new results on later requests are packed. The threshold is 16 KiB, with limits of 8 MiB per result, 128 MiB of archives per session, and 4 MiB / 20,000 entries for state.
 
-只处理可还原的纯文本工具结果，不打包图片、错误结果、归档回读或已经固定为原文的历史结果。归档/状态采用私有文件；写入中断会冻结该会话的新打包，已有状态不可读时返回 503，而不是重写不可信的历史。
+Only recoverable plain-text tool results are processed. Images, error results, archive readbacks, and history already pinned as full text are not packed. Archives and state use private files. An interrupted write freezes new packing for that session. Unreadable existing state returns 503 rather than rewriting untrusted history.
 
-**归档包含工具输出原文，可能包含敏感代码或数据。** 不共享整个归档目录。归档不自动清理；仅在确定对应会话不再需要历史与回读后，用户自行清理。它不是上游缓存，也不保证与上游计费相同的节省比例。`CLAUDE_CONFIG_DIR` 不移动功能开关或归档路径。
+**Archives contain the original tool output and may include sensitive code or data.** Do not share the entire archive directory. Archives are not cleaned up automatically; remove them manually only after confirming the session no longer needs its history or readbacks. Observation Pack is not an upstream cache and does not guarantee equivalent billing savings. `CLAUDE_CONFIG_DIR` does not relocate the toggle or archive paths.
 
-## 环境变量
+## Environment variables
 
-环境变量须传给**代理进程**，不是只设在另一个 Claude 终端。运行时开关读取方式不同：改变账号/URL/CLI 根目录后建议重启代理。
+Pass these variables to the **proxy process**, not just to another terminal running Claude. Runtime switches are read in different ways; restart the proxy after changing accounts, URLs, or the CLI configuration root.
 
-| 变量 | 实际行为 |
+| Variable | Behavior |
 | --- | --- |
-| `OPENAI_API_KEY` | 优先使用 OpenAI API key，覆盖存储的 ChatGPT 凭据，不持久化 |
-| `OPENAI_BASE_URL` | API-key 模式的 `/models` 与 `/responses` 基址；默认 `https://api.openai.com/v1`，不改写 Codex/ChatGPT OAuth 的官方地址 |
-| `PI_AUTH_FILE` | 启动时显式只读导入来源；目标已存在则不覆盖 |
-| `CLAUDE_CONFIG_DIR` | 实际 CLI settings / 私有备份根目录；默认 `~/.claude` |
-| `CODEX_CLIENT_VERSION` | Codex 模型目录的 client version query，默认 `0.162.1` |
-| `OPENAI_PROMPT_CACHE=0` | 不生成 GPT fallback prompt cache key；不承诺关闭上游服务自身的一切缓存 |
-| `CLAUDE_PROMPT_CACHE=0` | 不自动补充 Claude cache 标记，已有客户端标记仍保留 |
-| `DISABLE_PROMPT_CACHING=1` | 禁用自动 Claude 标记 |
-| `DISABLE_PROMPT_CACHING_HAIKU=1` / `..._SONNET=1` / `..._OPUS=1` | 按 Claude 模型家族禁用自动标记 |
-| `PI_CACHE_RETENTION=long` | 没有邻近标记约束时，自动 Claude 标记使用 `ttl: "1h"`；其他值使用短期默认 |
-| `HOME` | 决定凭据、功能开关与归档的默认位置；自动测试使用临时 HOME |
-| `PATH`、Windows `APPDATA` / `ProgramFiles` | CLI 版本探测安装位置；不代表自动安装 |
-| `RUN_CLAUDE_CLI_TESTS=1` | 测试专用：显式启用需要已安装 Claude Code 的隔离用例，默认跳过 |
+| `OPENAI_API_KEY` | Uses an OpenAI API key instead of stored ChatGPT credentials; never persisted |
+| `OPENAI_BASE_URL` | Base URL for `/models` and `/responses` in API-key mode; defaults to `https://api.openai.com/v1` and does not replace official Codex / ChatGPT OAuth endpoints |
+| `PI_AUTH_FILE` | Explicit read-only import source at startup; an existing destination is never overwritten |
+| `CLAUDE_CONFIG_DIR` | Actual CLI settings root; private backups, Statusline generations, and service state/logs live under its `claude-proxy/` directory; defaults to `~/.claude` |
+| `CODEX_CLIENT_VERSION` | Client-version query value for the Codex model catalog; defaults to `0.162.1` |
+| `OPENAI_PROMPT_CACHE=0` | Disables generation of the GPT fallback prompt-cache key; does not guarantee disabling every upstream cache mechanism |
+| `CLAUDE_PROMPT_CACHE=0` | Disables automatic Claude cache annotations; existing client annotations are retained |
+| `DISABLE_PROMPT_CACHING=1` | Disables automatic Claude cache annotations |
+| `DISABLE_PROMPT_CACHING_HAIKU=1` / `..._SONNET=1` / `..._OPUS=1` | Disables automatic annotations for the corresponding Claude model family |
+| `PI_CACHE_RETENTION=long` | Uses `ttl: "1h"` for automatic Claude annotations when neighboring markers do not constrain the TTL; other values use the short-lived default |
+| `HOME` | Determines default credential, feature-toggle, and archive locations; automated tests use a temporary HOME |
+| `PATH`, Windows `APPDATA` / `ProgramFiles` / `LOCALAPPDATA` / `SystemRoot` | Installation locations searched by CLI/dependency probes; no automatic installation |
+| `RUN_CLAUDE_CLI_TESTS=1` | Test-only opt-in for isolated cases requiring an installed Claude Code CLI; skipped by default |
 
-CLI 配置写入的 `ANTHROPIC_*` 和 gateway 环境字段供 **Claude Code 客户端**使用，见配置章节；不能用它们替代代理自己的上游认证。
+The `ANTHROPIC_*` and gateway environment fields written by CLI setup are for the **Claude Code client**, as described in the configuration section. They do not replace the proxy's upstream authentication.
 
-自定义 `OPENAI_BASE_URL` 时，该地址会收到 API key、模型请求与对话内容，只能指向可信的兼容服务。不要关闭 TLS 校验；如企业网络需要额外 CA，应按 Node.js 的可信证书方式配置。
+A custom `OPENAI_BASE_URL` receives the API key, model requests, and conversation content. Point it only at a trusted compatible service. Do not disable TLS verification; if an enterprise network requires an additional CA, configure trusted certificates through Node.js.
 
-## 安全与故障排查
+## Security and troubleshooting
 
-### 安全边界
+### Security boundaries
 
-- 固定本机监听。Messages API 的 CORS 兼容不是鉴权，API 本身不校验占位 key；不要通过端口转发、反向代理或公网映射暴露它，也不要把本机页面发布到外部。
-- 登录/配置路由先于通配 API CORS，校验 loopback 地址、精确 Host/端口和页面随机 nonce；POST 还需同源 Origin 与 `application/json`。使用 nonce CSP、`no-store`、禁止 framing 与跳转。
-- 认证 body 上限 16 KiB、读取超时 10 秒；配置 body 必须为 `{}`。页面不使用浏览器持久存储保存 token，不返回真实 token 给页面。
-- 只在官方页面输入密码，设备码也应保密。不共享 auth 文件、私有 settings 备份或 observation 原始归档。
-- Claude 工具仍可操作本机文件或执行命令，继续使用客户端权限确认与项目隔离；网关不代替权限控制。
+- The listener is local-only. Messages API CORS compatibility is not authentication, and the API does not validate the placeholder key. Do not expose it through port forwarding, a reverse proxy, or a public tunnel, and do not publish the local page externally.
+- Login and configuration routes run before wildcard API CORS. They validate the loopback address, exact Host / port, and a random page nonce. POST requests also require a same-origin Origin and `application/json`. Protections include nonce-based CSP, `no-store`, framing restrictions, and redirect restrictions.
+- Authentication bodies are limited to 16 KiB with a 10-second read timeout. Configuration bodies must be `{}`. The page does not persist tokens in browser storage or receive actual access tokens.
+- Enter passwords only on official websites and keep device codes private. Do not share authentication files, private settings backups, or original observation archives.
+- Claude tools can still access local files or execute commands. Continue using client-side permission prompts and project isolation; the gateway does not replace permission controls.
 
-### 常见问题
+### Common issues
 
-| 现象 | 检查方向 |
+| Symptom | What to check |
 | --- | --- |
-| 代理不能监听 / 端口占用 | 确认只启动一份进程；检查端口 8082，再手动停止不需要的进程 |
-| 页面打不开 | 使用 `127.0.0.1:8082/login`；代理只绑定 IPv4 loopback，某些 localhost/IPv6 解析环境可能不同 |
-| 登录状态 403 | 从本机页面刷新 nonce；不要经其他 Host、代理、跨域页面或无 Origin 的 POST 操作 |
-| 设备码到期 / 登录失败 | 在官方页面完成授权，检查账号权限、网络与上游设备授权可用性，再重新开始 |
-| OpenAI 401 / 刷新失败 | 检查环境覆盖、存储权限和 token 有效性；从页面重新登录；不要粘贴 token 到日志 |
-| Copilot 403 / 无 Claude 模型 | 检查 Copilot 订阅、组织授权、model picker 与策略，确认当前账号允许目标模型 |
-| `/v1/models` 暂时为空 | 首次发现可能超过返回预算；稍后重试。无认证、上游故障或无权限不会生成虚假的默认模型 |
-| 配置按钮不可用 | 确认 Claude CLI 可探测、已有匹配凭据、settings 有效且可写，并手动处理认证冲突 |
-| 配置成功但 Claude 不走网关 | 重开终端，检查 shell/project/local/managed overrides，确认代理和 CLI 使用同一 `CLAUDE_CONFIG_DIR` |
-| 未知模型 400 | 从当前 `/v1/models` 复制可用 ID；显式其他类型不会自动回退 |
-| 429 / 配额错误 | 按上游限额等待或调整账号/模型，检查上游用量与配额 |
-| 流式中途错误 / 空内容 | 查看状态与 SSE error；检查网络、上游 terminal event、模型权限和请求超时 |
-| cache hit 为 0 | 缓存由上游决定，检查 key/session、system/tools 稳定性和开关；不要将 replay 命中等同于计费缓存命中 |
-| observation state 不可读 | 检查该会话归档完整性与权限，恢复可信状态或新建会话；不要在活跃会话中直接删 ledger |
+| Proxy cannot listen / port already in use | Ensure only one proxy is running, inspect port 8082, and manually stop any unwanted process |
+| Login page does not open | Use `127.0.0.1:8082/login`; the proxy binds only IPv4 loopback, and localhost / IPv6 resolution may differ by environment |
+| Login status returns 403 | Reload the local page to refresh its nonce; do not use another Host, a proxy, a cross-origin page, or a POST without Origin |
+| Device code expires / login fails | Complete authorization on the official website, check account permissions and network / device-authorization availability, then start again |
+| OpenAI 401 / refresh failure | Check environment overrides, storage permissions, and token validity; log in again through the page, and do not paste tokens into logs |
+| Copilot 403 / no Claude models | Check the Copilot subscription, organization authorization, model picker, and policies; confirm the account can access the model |
+| `/v1/models` is temporarily empty | Initial discovery may exceed the response budget; retry later. Missing credentials, upstream outages, or unavailable permissions do not produce a fabricated default model |
+| CLI configuration button is unavailable | Ensure Claude CLI is discoverable, matching credentials exist, settings are valid and writable, and authentication conflicts have been resolved manually |
+| Statusline button is unavailable / deployment fails | Check CLI, Bash 3+, jq 1.6+, Node 18+, the bundled runtime, settings permissions, and private deployment integrity; login is not required |
+| Project Code Memory button is unavailable / conflict | Check Claude CLI, CPython 3.9+, bundle integrity, safe skill/private directories, and installation lock; different or incomplete installations need manual handling |
+| Service registration is unavailable | Confirm macOS GUI login, safe writable paths, matching label/installation, and supported environment/TLS options; no system service is created |
+| Service request disconnects / result is unknown | Let the page reconnect and verify its operation; do not repeat a lost POST blindly. Inspect private logs and status |
+| Service reports recovery_failed / fails after paths move | Start `bash mac/start-proxy.sh` manually, inspect the matching LaunchAgent and private logs, and repair paths without overwriting another installation |
+| Setup succeeds but Claude bypasses the gateway | Open a new terminal, check shell / project / local / managed overrides, and ensure the proxy and CLI use the same `CLAUDE_CONFIG_DIR` |
+| Unknown model returns 400 | Copy an available ID from the current `/v1/models`; explicit unsupported model types do not automatically fall back |
+| 429 / quota error | Wait according to upstream limits or adjust the account / model, and inspect upstream usage and quota |
+| Streaming fails midway / empty content | Inspect status and SSE errors; check the network, upstream terminal events, model permissions, and timeouts |
+| Cache hit is 0 | Caching is controlled upstream; check key / session identity, system / tools stability, and switches. Replay hits are not the same as billable prompt-cache hits |
+| Observation state is unreadable | Check archive integrity and permissions, restore trusted state, or start a new session. Do not delete the ledger during an active session |
 
-## 离线测试
+## Offline tests
 
-在项目根目录运行：
+From the project root:
 
 ```bash
 node --test test/*.test.js
 node --check mac/proxy.js
 node --check windows/proxy.js
 bash -n mac/start-proxy.sh
+bash -n statusline/statusline-command.sh
 cmp mac/proxy.js windows/proxy.js
 git diff --check
 ```
 
-为确保功能开关、归档和配置测试不触及个人目录，macOS / Linux 推荐：
+To keep feature-toggle, archive, and configuration tests away from personal directories, use an isolated HOME on macOS / Linux:
 
 ```bash
 TEST_HOME="$(mktemp -d)"
 HOME="$TEST_HOME" CLAUDE_CONFIG_DIR="$TEST_HOME/config" \
   node --test test/*.test.js
-# 检查完成后，用户可自行删除刚创建的 TEST_HOME。
+# After checking the results, remove the TEST_HOME you just created if desired.
 ```
 
-Windows PowerShell 可以创建独立临时目录，并为该次测试设置 `HOME`、`USERPROFILE` 和 `CLAUDE_CONFIG_DIR`，测试后恢复原环境。`node --check` 同样适用；`bash -n` / `cmp` 需要 Git Bash 或相应工具。
+In Windows PowerShell, create a separate temporary directory and set `HOME`, `USERPROFILE`, and `CLAUDE_CONFIG_DIR` for that test run, restoring the original environment afterward. `node --check` also works on Windows; `bash -n` / `cmp` require Git Bash or equivalent tools.
 
-默认套件使用模拟上游和临时目录，覆盖设备授权、token 刷新竞态、目录缓存失效、JSON/SSE、工具/图片、cache usage、Responses replay、真实客户端断连、登录路由安全和私有配置备份。HTTP 端到端测试同时验证 GPT / Copilot 两条路径，并拒绝未知模型。
+The default suite uses mocked upstreams and temporary directories. It covers device authorization, token-refresh races, catalog invalidation, JSON / SSE, tools / images, cache usage, Responses replay, genuine client disconnects, login-route security, and private settings backups. HTTP end-to-end tests exercise both GPT and Copilot paths and reject unknown models. Statusline tests deploy/run only in temporary roots with synthetic input. Service tests mock system-management commands and run fake proxies on random non-8082 ports; VM/e2e tests inject a fake service. Project Code Memory tests use temporary CLI roots and fake dependency probes, covering no-op preservation, conflicts, concurrent publication, short writes, and external-edit cleanup. No real Statusline configuration, global skill installation, or launchd registration/restart is performed.
 
-`claude-cli.test.js` 与 `observation-pack-cli.test.js` 默认跳过。只有明确想运行本机已安装 CLI 的隔离检查时，才设置 `RUN_CLAUDE_CLI_TESTS=1`；这些检查依然使用模拟网关，不代表真实账号授权或真实上游验证。
+`claude-cli.test.js` and `observation-pack-cli.test.js` are skipped by default. Set `RUN_CLAUDE_CLI_TESTS=1` only when explicitly choosing to run isolated checks with the locally installed CLI. They still use mocked gateways and do not validate real account authorization or real upstream access.
 
-当前迁入实现的验证以 macOS 上的离线测试为依据；Windows 批处理与探测代码进行了静态/模拟检查，未宣称在真实 Windows 或真实账号环境中执行成功。
+Validation is based on offline tests on macOS. Windows batch launchers and probe code have received static / mocked checks; successful execution on a real Windows installation or with real accounts has not been claimed.
 
-## 许可证
+## License
 
-项目保留根目录 [MIT LICENSE](LICENSE)。`lib/device-login.js` 中保留 Pi 来源声明，对应第三方 MIT 许可证见 [third-party/pi/LICENSE](third-party/pi/LICENSE)。
+The project retains the root [MIT LICENSE](LICENSE). `lib/device-login.js` preserves its Pi source attribution; the corresponding third-party MIT license is in [third-party/pi/LICENSE](third-party/pi/LICENSE). The bundled Claude HUD runtime retains its [MIT LICENSE](statusline/claude-hud/LICENSE), copyright 2026 Jarrod Watts; its local source provenance, preserved vendor adaptations, and measured aggregate SHA-256 are documented in [statusline/SOURCE.md](statusline/SOURCE.md). Project Code Memory retains its [MIT LICENSE](project-code-memory/LICENSE); source-owner authorization and pinned bundle provenance are recorded in [project-code-memory/SOURCE.md](project-code-memory/SOURCE.md).

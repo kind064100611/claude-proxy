@@ -40,8 +40,8 @@ for (const platform of ["mac", "windows"]) {
           response.end(JSON.stringify({ type: "message", model: body.model, content: [] }));
         } }
         : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [{ id: "gpt-5.4", owned_by: "openai" }] }) }
-        : name === "http" ? { createServer: (handler) => { route = handler; return {}; } } : nativeRequire(name),
-      __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
+        : name === "http" ? { createServer: (handler) => { route = handler; return {}; } } : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) } : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) } : nativeRequire(name),
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
       setTimeout, clearTimeout, setInterval, clearInterval
     };
     const source = fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0];
@@ -114,8 +114,8 @@ for (const platform of ["mac", "windows"]) {
     const nativeRequire = createRequire(filename);
     const context = {
       require: (name) => name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [] }) }
-        : name === "http" ? { createServer: () => ({}) } : nativeRequire(name),
-      __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
+        : name === "http" ? { createServer: () => ({}) } : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) } : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) } : nativeRequire(name),
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
       setTimeout, clearTimeout, setInterval, clearInterval
     };
     const source = fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0];
@@ -152,8 +152,8 @@ for (const platform of ["mac", "windows"]) {
     const context = {
       require: (name) => name === "../lib/openai-responses" ? { ...responses, requestResponses: mockResponses }
         : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [] }) }
-        : name === "http" ? { createServer: () => ({}) } : nativeRequire(name),
-      __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn: (line) => warnings.push(line), error() {} },
+        : name === "http" ? { createServer: () => ({}) } : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) } : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) } : nativeRequire(name),
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn: (line) => warnings.push(line), error() {} },
       setTimeout, clearTimeout, setInterval, clearInterval
     };
     const source = fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0];

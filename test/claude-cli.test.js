@@ -29,8 +29,8 @@ test("installed Claude CLI sends selected GPT and gateway serves discovery URL",
       await options.onChunk({ choices: [{ delta: { content: "gateway-smoke-ok" } }] });
       await options.onChunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 2, cached_tokens: 10 } });
       return { streamed: true };
-    } } : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [{ id: "gpt-5.4", owned_by: "openai" }] }) } : nativeRequire(name),
-    __dirname: path.dirname(filename), process, Buffer, URL,
+    } } : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [{ id: "gpt-5.4", owned_by: "openai" }] }) } : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) } : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) } : nativeRequire(name),
+    __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL,
     console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval
   };
   vm.runInNewContext(fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0], context, { filename });

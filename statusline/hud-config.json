@@ -1,0 +1,24 @@
+{
+  "lineLayout": "expanded",
+  "showSeparators": false,
+  "display": {
+    "showTools": true,
+    "showAgents": true,
+    "showTodos": true,
+    "showDuration": true,
+    "showConfigCounts": true,
+    "showSessionName": true,
+    "showTokenBreakdown": true,
+    "showSpeed": true,
+    "showSessionTokens": true,
+    "showUsage": true,
+    "usageBarEnabled": true,
+    "usageCompact": true
+  },
+  "gitStatus": {
+    "enabled": true,
+    "showDirty": true,
+    "showAheadBehind": false,
+    "showFileStats": false
+  }
+}
