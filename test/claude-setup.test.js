@@ -352,3 +352,42 @@ test("Windows probe resolves npm cli.js without invoking cmd wrappers", async ()
   assert.ok(calls.some((call) => call.args[0].endsWith("cli.js")));
   assert.ok(calls.every((call) => !call.file.endsWith(".cmd") && call.options.shell === false));
 });
+
+test("configureCli clears only the rejected placeholder API key from Claude global config", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const root = path.join(home, ".claude");
+  fs.mkdirSync(root);
+  const f = fixture(t, { configRoot: root, home });
+  const homeConfig = path.join(home, ".claude.json");
+  const rootConfig = path.join(root, ".claude.json");
+  const config = { theme: "dark", customApiKeyResponses: { approved: ["keep-approved"], rejected: ["sk-placeholder", "other-key"] } };
+  fs.writeFileSync(homeConfig, JSON.stringify(config), { mode: 0o600 });
+  fs.writeFileSync(rootConfig, JSON.stringify(config));
+  const result = await f.setup.configureCli();
+  assert.doesNotMatch(result.notice, /rejected API key/);
+  for (const file of [homeConfig, rootConfig]) {
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(saved.theme, "dark");
+    assert.deepEqual(saved.customApiKeyResponses, { approved: ["keep-approved"], rejected: ["other-key"] });
+  }
+  if (process.platform !== "win32") assert.equal(fs.statSync(homeConfig).mode & 0o777, 0o600);
+  const bytes = fs.readFileSync(homeConfig);
+  await f.setup.configureCli();
+  assert.deepEqual(fs.readFileSync(homeConfig), bytes);
+  assert.deepEqual(fs.readdirSync(home).sort(), [".claude", ".claude.json"]);
+});
+
+test("configureCli ignores home .claude.json for a custom config root and reports unreadable config", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const homeConfig = path.join(home, ".claude.json");
+  const original = JSON.stringify({ customApiKeyResponses: { rejected: ["sk-placeholder"] } });
+  fs.writeFileSync(homeConfig, original);
+  const f = fixture(t, { home });
+  fs.writeFileSync(path.join(f.root, ".claude.json"), "{broken");
+  const result = await f.setup.configureCli();
+  assert.match(result.notice, /rejected API key/);
+  assert.equal(fs.readFileSync(homeConfig, "utf8"), original);
+  assert.equal(fs.readFileSync(path.join(f.root, ".claude.json"), "utf8"), "{broken");
+});
