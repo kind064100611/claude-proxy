@@ -1,6 +1,6 @@
 ---
 name: coding-discipline
-description: ALWAYS load this skill FIRST, without exception, BEFORE writing or modifying ANY code — this is mandatory, not optional. MUST TRIGGER on every request that writes code, implements a feature, fixes a bug, refactors, adds or changes tests, edits existing files, or produces any code diff whatsoever, no matter how small. Whenever you are about to use Edit, Write, or NotebookEdit on code, load this skill first. Apply think-before-coding, simplicity-first, surgical-changes, and goal-driven-execution principles. The ONLY exceptions are pure Q&A, code explanation with no edits, and single-character typo fixes.
+description: "Load this skill FIRST, before writing or modifying code, whenever the change involves a judgment call — implementing a feature, fixing a bug, refactoring, designing an interface, adding or changing test behavior, or any edit where scope, approach, or correctness is not already fully determined. Applies think-before-coding, simplicity-first, surgical-changes, and goal-driven-execution principles. Skip it for work with no judgment call: pure Q&A and code explanation without edits, typo and comment-only fixes, renames and other mechanical edits whose full extent is already specified, and configuration-only changes. When genuinely unsure whether a change carries a judgment call, load it."
 ---
 
 # Coding Discipline
@@ -15,13 +15,14 @@ Load this skill BEFORE you start editing when the task involves:
 - Writing new code, functions, modules, or files
 - Modifying existing code (bug fixes, feature additions, refactors)
 - Adding tests or changing test behavior
-- Any change where a diff will be produced
+- Any change where scope, approach, or correctness still requires a decision
 
 ## When NOT to Use
 
 - Pure questions ("how does X work?", "what does this code do?")
 - Reading/explaining code without modifying it
-- Single-character typo fixes
+- Typo and comment-only fixes
+- Mechanical edits whose full extent is already specified (e.g. a named rename across known sites)
 - Configuration-only changes that have no judgment calls
 
 ## 1. Think Before Coding
@@ -35,7 +36,12 @@ Before implementing:
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
-## 2. Simplicity First
+## 2. Review Changes Personally
+
+Do not require an expert agent before coding. The agent responsible for the implementation must personally inspect the complete diff in context, check every changed line against the requested goal, look for omissions, bugs, edge cases, and missing tests, and run the relevant checks. Delegated review may supplement this work, but never replaces the implementing agent's own careful review.
+
+
+## 3. Simplicity First
 
 Minimum code that solves the problem. Nothing speculative.
 
@@ -47,7 +53,7 @@ Minimum code that solves the problem. Nothing speculative.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+## 4. Surgical Changes
 
 Touch only what you must. Clean up only your own mess.
 
@@ -65,7 +71,7 @@ When your changes create orphans:
 
 The test: Every changed line should trace directly to the user's request.
 
-## 4. Goal-Driven Execution
+## 5. Goal-Driven Execution
 
 Define success criteria. Loop until verified.
 

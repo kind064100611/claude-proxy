@@ -121,7 +121,7 @@
 
     <section class="card" aria-labelledby="coding-discipline-heading">
       <h2 id="coding-discipline-heading">Install Coding Discipline</h2>
-      <p>Install the bundled coding-discipline skill (MIT, adapted from andrej-karpathy-skills) into your Claude CLI skills directory. Requires Claude CLI; install it manually first. Existing different versions are never overwritten.</p>
+      <p>Install the bundled coding-discipline skill (MIT, adapted from andrej-karpathy-skills) into your Claude CLI skills directory. Requires Claude CLI; install it manually first. Each click replaces any existing coding-discipline skill with the bundled version.</p>
       <p>Skill use is model-driven, not a hook. Open a new Claude session after installation.</p>
       <p id="coding-discipline-status" class="status" role="status" aria-live="polite">Loading installation status…</p>
       <button id="coding-discipline-install" type="button" disabled>Install Coding Discipline</button>
@@ -260,7 +260,7 @@
     function renderCodingDiscipline(status) {
       const button = document.getElementById("coding-discipline-install");
       const element = document.getElementById("coding-discipline-status");
-      button.disabled = codingDisciplineBusy || status.ready !== true || status.installed === true;
+      button.disabled = codingDisciplineBusy || status.ready !== true;
       if (codingDisciplineMessage) setMessage(element, codingDisciplineMessage.text, codingDisciplineMessage.kind);
       else if (status.installed) setMessage(element, "Coding Discipline is installed. Start a new Claude session to use it.", "success");
       else setMessage(element, status.ready ? "Ready to install Coding Discipline." : (status.reason || "Coding Discipline is not ready to install."), "");

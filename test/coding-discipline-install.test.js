@@ -18,6 +18,12 @@ function fixture(t, options = {}) {
   return { directory, configRoot, bundleRoot, target, dependencies, installer };
 }
 
+function assertBundle(f) {
+  assert.deepEqual(fs.readdirSync(f.target).sort(), [...INSTALL_FILES].sort());
+  for (const relative of INSTALL_FILES) assert.deepEqual(fs.readFileSync(path.join(f.target, relative)), fs.readFileSync(path.join(f.bundleRoot, relative)));
+  assert.deepEqual(fs.readdirSync(path.dirname(f.target)), ["coding-discipline"]);
+}
+
 test("bundle is the coding-discipline skill and manifest hashes match the files", () => {
   const bundleRoot = path.join(__dirname, "../coding-discipline");
   const manifest = JSON.parse(fs.readFileSync(path.join(bundleRoot, "manifest.json"), "utf8"));
@@ -30,7 +36,7 @@ test("bundle is the coding-discipline skill and manifest hashes match the files"
   assert.match(fs.readFileSync(path.join(bundleRoot, "SOURCE.md"), "utf8"), new RegExp(manifest.upstream.commit));
 });
 
-test("status/factory are read-only, private install is complete and repeated installs do not write", async (t) => {
+test("status/factory are read-only, private install is complete and every install replaces the target", async (t) => {
   const f = fixture(t);
   assert.equal(fs.existsSync(f.configRoot), false);
   assert.equal((await f.installer.getStatus()).state, "absent");
@@ -45,22 +51,28 @@ test("status/factory are read-only, private install is complete and repeated ins
   if (process.platform !== "win32") assert.equal(fs.statSync(f.target).mode & 0o777, 0o700);
   assert.deepEqual(fs.readdirSync(path.dirname(f.target)), ["coding-discipline"]);
   assert.equal(fs.existsSync(path.join(f.configRoot, "settings.json")), false);
-  assert.equal((await f.installer.getStatus()).state, "installed");
-  const before = fs.statSync(path.join(f.target, "SKILL.md"));
+  const status = await f.installer.getStatus();
+  assert.equal(status.state, "installed");
+  assert.equal(status.ready, true);
+  const before = fs.statSync(f.target).ino;
+  assert.equal((await f.installer.install()).changed, true);
+  assert.notEqual(fs.statSync(f.target).ino, before);
+  assertBundle(f);
   f.dependencies.cli = false;
-  assert.equal((await f.installer.install()).changed, false);
-  assert.equal(fs.statSync(path.join(f.target, "SKILL.md")).mtimeMs, before.mtimeMs);
+  await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_UNAVAILABLE" });
+  assertBundle(f);
 });
 
-test("an identical SKILL.md-only install is a no-op that does not probe or add files", async (t) => {
-  const f = fixture(t, { probe: async () => { throw new Error("must not probe a no-op"); } });
+test("an identical SKILL.md-only install reports installed and is completed on install", async (t) => {
+  const f = fixture(t, { probe: async () => { throw new Error("status must not probe when installed"); } });
   fs.mkdirSync(f.target, { recursive: true, mode: 0o755 });
   fs.copyFileSync(path.join(f.bundleRoot, "SKILL.md"), path.join(f.target, "SKILL.md"));
-  const mode = fs.statSync(f.target).mode;
   assert.equal((await f.installer.getStatus()).installed, true);
-  assert.equal((await f.installer.install()).changed, false);
-  assert.deepEqual(fs.readdirSync(f.target), ["SKILL.md"]);
-  assert.equal(fs.statSync(f.target).mode, mode);
+  const g = fixture(t);
+  fs.mkdirSync(g.target, { recursive: true });
+  fs.copyFileSync(path.join(g.bundleRoot, "SKILL.md"), path.join(g.target, "SKILL.md"));
+  assert.equal((await g.installer.install()).changed, true);
+  assertBundle(g);
 });
 
 test("missing CLI, failed probe and damaged bundle cannot create user directories", async (t) => {
@@ -77,23 +89,23 @@ test("missing CLI, failed probe and damaged bundle cannot create user directorie
   assert.equal(fs.existsSync(f.configRoot), false);
 });
 
-test("partial, modified and non-directory targets are preserved conflicts", async (t) => {
+test("partial, modified and non-directory targets are replaced without conflict checks", async (t) => {
   for (const kind of ["partial", "modified", "file"]) {
     const f = fixture(t);
     fs.mkdirSync(path.dirname(f.target), { recursive: true });
-    if (kind === "file") fs.writeFileSync(f.target, "keep");
+    if (kind === "file") fs.writeFileSync(f.target, "old");
     else if (kind === "partial") {
       fs.mkdirSync(f.target);
-      fs.copyFileSync(path.join(f.bundleRoot, "LICENSE"), path.join(f.target, "LICENSE"));
+      fs.writeFileSync(path.join(f.target, "extra.md"), "old");
     } else {
       fs.cpSync(f.bundleRoot, f.target, { recursive: true });
-      fs.appendFileSync(path.join(f.target, "SKILL.md"), "keep");
+      fs.appendFileSync(path.join(f.target, "SKILL.md"), "old");
     }
-    assert.equal((await f.installer.getStatus()).state, "conflict");
-    await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_CONFLICT" });
-    assert.equal(fs.existsSync(f.target), true);
-    if (kind === "modified") assert.ok(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8").endsWith("keep"));
-    if (kind === "partial") assert.deepEqual(fs.readdirSync(f.target), ["LICENSE"]);
+    const status = await f.installer.getStatus();
+    assert.equal(status.state, "absent");
+    assert.equal(status.ready, true);
+    assert.equal((await f.installer.install()).changed, true);
+    assertBundle(f);
   }
 });
 
@@ -111,11 +123,11 @@ test("status shares pending probes and caches briefly, install always rechecks d
   assert.equal(calls, 3);
 });
 
-test("concurrent installs are serialized and only the first writes", async (t) => {
+test("concurrent installs are serialized and each replaces the target", async (t) => {
   const f = fixture(t);
   const results = await Promise.all([f.installer.install(), f.installer.install()]);
-  assert.deepEqual(results.map((result) => result.changed), [true, false]);
-  assert.deepEqual(fs.readdirSync(path.dirname(f.target)), ["coding-discipline"]);
+  assert.deepEqual(results.map((result) => result.changed), [true, true]);
+  assertBundle(f);
 });
 
 test("write failure removes the private stage and leaves no target", async (t) => {
@@ -129,7 +141,7 @@ test("write failure removes the private stage and leaves no target", async (t) =
   assert.deepEqual(fs.readdirSync(path.dirname(f.target)), []);
 });
 
-test("a target created during staging is preserved as a conflict", async (t) => {
+test("a non-empty target created during publishing fails safely and leaves no stage", async (t) => {
   const fsImpl = Object.create(fs);
   let f;
   fsImpl.renameSync = (from, to) => {
@@ -138,12 +150,27 @@ test("a target created during staging is preserved as a conflict", async (t) => 
     return fs.renameSync(from, to);
   };
   f = fixture(t, { fsImpl });
-  await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_CONFLICT" });
+  await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_UNAVAILABLE" });
   assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), "competing");
   assert.deepEqual(fs.readdirSync(path.dirname(f.target)), ["coding-discipline"]);
 });
 
-test("symlinked install paths are preserved conflicts", { skip: process.platform === "win32" }, async (t) => {
+test("publishing failure restores the previous target", async (t) => {
+  const fsImpl = Object.create(fs);
+  let f;
+  fsImpl.renameSync = (from, to) => {
+    if (to === f.target && path.basename(from).startsWith(".coding-discipline-stage-")) throw new Error("synthetic publish failure");
+    return fs.renameSync(from, to);
+  };
+  f = fixture(t, { fsImpl });
+  fs.mkdirSync(f.target, { recursive: true });
+  fs.writeFileSync(path.join(f.target, "SKILL.md"), "previous");
+  await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_UNAVAILABLE" });
+  assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), "previous");
+  assert.deepEqual(fs.readdirSync(path.dirname(f.target)), ["coding-discipline"]);
+});
+
+test("symlinked install paths are used or replaced without touching linked target content", { skip: process.platform === "win32" }, async (t) => {
   for (const kind of ["config", "skills", "target", "skill"]) {
     const f = fixture(t);
     const external = path.join(f.directory, "external");
@@ -154,39 +181,39 @@ test("symlinked install paths are preserved conflicts", { skip: process.platform
       fs.symlinkSync(external, path.dirname(f.target));
     } else if (kind === "target") {
       fs.mkdirSync(path.dirname(f.target), { recursive: true });
-      fs.copyFileSync(path.join(f.bundleRoot, "SKILL.md"), path.join(external, "SKILL.md"));
+      fs.writeFileSync(path.join(external, "SKILL.md"), "external");
       fs.symlinkSync(external, f.target);
     } else {
       fs.mkdirSync(f.target, { recursive: true });
-      fs.copyFileSync(path.join(f.bundleRoot, "SKILL.md"), path.join(external, "SKILL.md"));
+      fs.writeFileSync(path.join(external, "SKILL.md"), "external");
       fs.symlinkSync(path.join(external, "SKILL.md"), path.join(f.target, "SKILL.md"));
     }
-    const before = fs.readdirSync(external);
-    assert.equal((await f.installer.getStatus()).state, "conflict");
-    await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_CONFLICT" });
-    assert.deepEqual(fs.readdirSync(external), before);
-    const linked = kind === "config" ? f.configRoot : kind === "skills" ? path.dirname(f.target) : kind === "target" ? f.target : path.join(f.target, "SKILL.md");
-    assert.ok(fs.lstatSync(linked).isSymbolicLink());
+    assert.equal((await f.installer.install()).changed, true);
+    assertBundle(f);
+    if (kind === "target" || kind === "skill") {
+      assert.equal(fs.lstatSync(f.target).isDirectory(), true);
+      assert.equal(fs.readFileSync(path.join(external, "SKILL.md"), "utf8"), "external");
+    }
   }
 });
 
-test("writable install parents are refused and paths are rechecked after the async probe", { skip: process.platform === "win32" }, async (t) => {
-  const unsafe = fixture(t);
-  fs.mkdirSync(path.dirname(unsafe.target), { recursive: true });
-  fs.chmodSync(path.dirname(unsafe.target), 0o777);
-  await assert.rejects(unsafe.installer.install(), { code: "CODING_DISCIPLINE_CONFLICT" });
-  assert.deepEqual(fs.readdirSync(path.dirname(unsafe.target)), []);
+test("writable install parents and targets created during the async probe are replaced", { skip: process.platform === "win32" }, async (t) => {
+  const writable = fixture(t);
+  fs.mkdirSync(path.dirname(writable.target), { recursive: true });
+  fs.chmodSync(path.dirname(writable.target), 0o777);
+  await writable.installer.install();
+  assertBundle(writable);
   let f;
   f = fixture(t, { probe: async () => {
     fs.mkdirSync(f.target, { recursive: true });
     fs.writeFileSync(path.join(f.target, "SKILL.md"), "created during probe");
     return { cli: true };
   } });
-  await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_CONFLICT" });
-  assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), "created during probe");
+  await f.installer.install();
+  assertBundle(f);
 });
 
-test("an empty target created during staging is not replaced", async (t) => {
+test("an empty target created during staging is replaced", async (t) => {
   const fsImpl = Object.create(fs);
   let f;
   fsImpl.writeFileSync = (file, ...rest) => {
@@ -194,9 +221,8 @@ test("an empty target created during staging is not replaced", async (t) => {
     if (file.endsWith("SKILL.md")) fs.mkdirSync(f.target);
   };
   f = fixture(t, { fsImpl });
-  await assert.rejects(f.installer.install(), { code: "CODING_DISCIPLINE_CONFLICT" });
-  assert.deepEqual(fs.readdirSync(f.target), []);
-  assert.deepEqual(fs.readdirSync(path.dirname(f.target)), ["coding-discipline"]);
+  await f.installer.install();
+  assertBundle(f);
 });
 
 test("existing user directory mode and settings are untouched", async (t) => {

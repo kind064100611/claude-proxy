@@ -518,3 +518,10 @@ test("Online Summary retention stays editable while summaries are off and saves 
   await offline.refresh();
   assert.equal(offline.element("online-summary-retention").disabled, true);
 });
+
+test("Coding Discipline stays clickable when already installed so it can reinstall", async () => {
+  const page = pageHarness(async () => [], { status: () => ({ codingDiscipline: { ready: true, installed: true } }) });
+  await page.refresh();
+  assert.equal(page.element("coding-discipline-install").disabled, false);
+  assert.match(page.element("coding-discipline-status").textContent, /is installed/);
+});
