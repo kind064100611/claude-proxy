@@ -69,7 +69,7 @@ for (const platform of ["mac", "windows"]) {
           memoryCalls.push("factory");
           return { getStatus: async () => ({ enabled: false, installed: false, ready: true, state: "absent" }),
             configure: async (enabled) => { memoryCalls.push(enabled); observations.setFeatures({ projectMemory: enabled }, path.join(root, "features.json"));
-              return { ok: true, changed: true, enabled, installed: enabled, ready: true, state: enabled ? "installed" : "absent" }; },
+              return { ok: true, changed: true, replaced: enabled, enabled, installed: enabled, ready: true, state: enabled ? "installed" : "absent" }; },
             autoEnable: async () => { memoryCalls.push("autoEnable"); return null; } };
         } };
         if (name === "../lib/project-memory-maintainer") return { createProjectMemoryMaintainer: (options) => {
@@ -121,7 +121,9 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(fs.existsSync(path.join(configRoot, "skills")), false);
     const memory = await fetch(base + "/api/auth/project-memory/configure", { method: "POST", headers, body: JSON.stringify({ enabled: true }) });
     assert.equal(memory.status, 200);
-    assert.equal((await memory.json()).installed, true);
+    const memoryResult = await memory.json();
+    assert.equal(memoryResult.installed, true);
+    assert.equal(memoryResult.replaced, true);
     assert.equal(memory.headers.get("access-control-allow-origin"), null);
     assert.deepEqual(memoryCalls, ["factory", true]);
     const models = await (await fetch(base + "/v1/models?limit=1000")).json();
@@ -148,7 +150,9 @@ for (const platform of ["mac", "windows"]) {
     assert.match(upstream[2].payload.system.at(-1).text, /ProjectMemoryUpdate/);
     const disabledMemory = await fetch(base + "/api/auth/project-memory/configure", { method: "POST", headers, body: JSON.stringify({ enabled: false }) });
     assert.equal(disabledMemory.status, 200);
-    assert.equal((await disabledMemory.json()).enabled, false);
+    const disabledResult = await disabledMemory.json();
+    assert.equal(disabledResult.enabled, false);
+    assert.equal(disabledResult.replaced, false);
     assert.deepEqual(memoryCalls, ["factory", true, false]);
     const count = upstream.length;
     for (const model of ["unknown-model", "claude-gateway/unsupported", "gpt-oss-20b"]) {

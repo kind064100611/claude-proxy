@@ -167,7 +167,7 @@ test("real HTTP device completion persists login, hides secrets and invalidates 
 test("Project Code Memory configure route enforces guards, validates bodies, sanitizes status and maps errors", async (t) => {
   const calls = [];
   let failure;
-  const service = { getStatus: async () => ({ enabled: false, installed: false, ready: true, state: "absent", reason: "unsafe-reason", notice: "unsafe-value", secret: "/private" }), configure: async (enabled) => { calls.push(enabled); if (failure) throw failure; return { ok: true, changed: true, enabled, installed: enabled, ready: true, state: enabled ? "installed" : "absent", secret: "/private" }; } };
+  const service = { getStatus: async () => ({ enabled: false, installed: false, ready: true, state: "absent", reason: "unsafe-reason", notice: "unsafe-value", secret: "/private" }), configure: async (enabled) => { calls.push(enabled); if (failure) throw failure; return { ok: true, changed: true, replaced: enabled ? "yes" : true, enabled, installed: enabled, ready: true, state: enabled ? "installed" : "absent", secret: "/private" }; } };
   const { api, port, router, nonce } = await fixture(t, { projectMemory: service });
   const route = "/api/auth/project-memory/configure";
   let remoteStatus;
@@ -186,12 +186,14 @@ test("Project Code Memory configure route enforces guards, validates bodies, san
     const result = await api(route, { method: "POST", body: JSON.stringify({ enabled }) });
     assert.equal(result.status, 200); assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(JSON.parse(result.text).enabled, enabled); assert.equal(JSON.parse(result.text).changed, true);
+    assert.equal(JSON.parse(result.text).replaced, !enabled);
+    assert.equal(typeof JSON.parse(result.text).replaced, "boolean");
     assert.ok(!result.text.includes("/private"));
   }
   assert.deepEqual(calls, [true, false]);
   failure = Object.assign(new Error("secret raw output"), { code: "PROJECT_MEMORY_CONFLICT" });
   let conflict = await api(route, { method: "POST", body: '{"enabled":true}' });
-  assert.equal(conflict.status, 409); assert.match(conflict.text, /cannot be enabled/); assert.ok(!conflict.text.includes("secret"));
+  assert.equal(conflict.status, 409); assert.match(conflict.text, /skill folder changed during installation/); assert.ok(!conflict.text.includes("secret"));
   conflict = await api(route, { method: "POST", body: '{"enabled":false}' });
   assert.equal(conflict.status, 409); assert.match(conflict.text, /Gateway maintenance is off/);
   failure = Object.assign(new Error("secret raw output"), { code: "EIO" });
@@ -219,6 +221,54 @@ test("Project Code Memory installs independently of damaged settings and absent 
   assert.equal(JSON.parse(response.text).enabled, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "gateway-features.json"), "utf8")).projectMemory, true);
   assert.equal(fs.readFileSync(path.join(root, "settings.json"), "utf8"), "{damaged settings");
+});
+
+test("a conflicting Project Code Memory skill remains selectable and reports the safe backup location", async (t) => {
+  const projectMemory = {
+    getStatus: async () => ({ enabled: false, installed: false, ready: true, state: "conflict", reason: "/private/project/skill" }),
+    configure: async (enabled) => ({ ok: true, changed: true, replaced: true, enabled, installed: enabled, ready: true, state: "installed" })
+  };
+  const { api } = await fixture(t, { projectMemory });
+  const statusResponse = await api("/api/auth/status");
+  const status = JSON.parse(statusResponse.text).projectMemory;
+  assert.deepEqual([status.ready, status.state], [true, "conflict"]);
+  assert.match(status.reason, /Turning this on backs up .*claude-proxy\/skill-backups\//i);
+  assert.match(status.reason, /then installs the query-only skill/i);
+  assert.ok(!statusResponse.text.includes("/private/project/skill"));
+  assert.ok(!statusResponse.text.includes("/Users/"));
+
+  const configured = await api("/api/auth/project-memory/configure", { method: "POST", body: '{"enabled":true}' });
+  const result = JSON.parse(configured.text);
+  assert.equal(configured.status, 200);
+  assert.equal(result.enabled, true);
+  assert.equal(result.replaced, true);
+  assert.equal(typeof result.replaced, "boolean");
+});
+
+test("real Project Code Memory conflicts require dependencies and return a private backup result", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pcm-http-replace-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, "skills/project-code-memory");
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "SKILL.md"), "user skill");
+  let ready = false;
+  let clock = 0;
+  const projectMemory = require("../lib/project-memory-install").createProjectMemoryInstaller({ configRoot: root,
+    featureFile: path.join(root, "gateway-features.json"), now: () => clock, probe: async () => ({ cli: true, python: ready }) });
+  const { api } = await fixture(t, { projectMemory });
+  let status = JSON.parse((await api("/api/auth/status")).text).projectMemory;
+  assert.deepEqual([status.ready, status.state], [false, "unavailable"]);
+  ready = true; clock = 3000;
+  status = JSON.parse((await api("/api/auth/status")).text).projectMemory;
+  assert.deepEqual([status.ready, status.state], [true, "conflict"]);
+  const response = await api("/api/auth/project-memory/configure", { method: "POST", body: '{"enabled":true}' });
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse(response.text).replaced, true);
+  assert.equal(JSON.parse(response.text).installed, true);
+  assert.ok(!response.text.includes(root));
+  const backups = path.join(root, "claude-proxy/skill-backups");
+  const [backup] = fs.readdirSync(backups);
+  assert.equal(fs.readFileSync(path.join(backups, backup, "SKILL.md"), "utf8"), "user skill");
 });
 
 test("Project Code Memory fixed errors and unavailable status do not leak raw data", async (t) => {

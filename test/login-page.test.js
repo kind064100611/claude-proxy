@@ -58,10 +58,35 @@ test("Project Code Memory checkbox gates, configures, reports success, and resto
   enabled = true; await page.refresh(); assert.equal(toggle.checked, true); assert.equal(toggle.disabled, false);
   enabled = false;
   toggle.checked = false; await toggle.listeners.change();
-  assert.equal(page.element("project-memory-status").textContent, "Gateway-maintained Project Code Memory is off. Start a new Claude session. Project caches are kept.");
+  assert.equal(page.element("project-memory-status").textContent, "Gateway-maintained Project Code Memory is off. Start a new Claude session. Backups and project caches are kept.");
   const failing = pageHarness(async () => [], { status: () => ({ projectMemory: { enabled: false, ready: true } }), configure: async () => response({ error: "Fixed conflict." }, 409) });
   await failing.refresh(); failing.element("project-memory-enabled").checked = true; await failing.element("project-memory-enabled").listeners.change();
   assert.equal(failing.element("project-memory-enabled").checked, false); assert.equal(failing.element("project-memory-status").textContent, "Fixed conflict.");
+});
+
+test("an existing skill conflict stays selectable and replacement success identifies the relative backup", async () => {
+  const reason = "An older or different Project Code Memory skill is installed. Turning this on backs up the existing skill to claude-proxy/skill-backups/ in your Claude CLI directory, then installs the query-only skill.";
+  let enabled = false;
+  const page = pageHarness(async () => [], { status: () => ({ projectMemory: enabled
+    ? { enabled: true, installed: true, ready: true, state: "installed" }
+    : { enabled: false, installed: false, ready: true, state: "conflict", reason } }),
+  configure: async (url, options) => {
+    enabled = JSON.parse(options.body).enabled;
+    return response({ ok: true, enabled, replaced: true });
+  } });
+  await page.refresh();
+  const toggle = page.element("project-memory-enabled");
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.checked, false);
+  assert.equal(page.element("project-memory-status").textContent, reason);
+  assert.match(page.element("project-memory-status").textContent, /claude-proxy\/skill-backups\//);
+  assert.match(page.element("project-memory-status").textContent, /query-only skill/);
+
+  toggle.checked = true;
+  await toggle.listeners.change();
+  assert.equal(toggle.checked, true);
+  assert.match(page.element("project-memory-status").textContent, /^Gateway-maintained Project Code Memory is on\..*claude-proxy\/skill-backups\//);
+  assert.doesNotMatch(page.element("project-memory-status").textContent, /\/Users\//);
 });
 
 test("Project Code Memory blocks duplicate changes, permits off during conflict, and keeps independent feedback", async () => {

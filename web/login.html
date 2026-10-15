@@ -114,7 +114,7 @@
 
     <section class="card" aria-labelledby="project-memory-heading">
       <h2 id="project-memory-heading">Gateway-maintained Project Code Memory</h2>
-      <p>When on, the gateway installs a query-only skill and adds a ProjectMemoryUpdate tool to Claude requests that can edit files. After a code change Claude calls it once and the gateway refreshes, adds and deletes records in the background with a cheaper model (Luna, then Haiku). Requires Claude CLI and Python 3.9+; when both are available and you have never changed this setting, the proxy turns it on at startup, otherwise it stays off and cannot be selected. Turning it off removes the skill only if unchanged and stays off; project caches are kept. Claude Code shows one “No such tool available” line per update; this is expected. Open a new Claude session after changing it.</p>
+      <p>When on, the gateway installs a query-only skill and adds a ProjectMemoryUpdate tool to Claude requests that can edit files. After a code change Claude calls it once and the gateway refreshes, adds and deletes records in the background with a cheaper model (Luna, then Haiku). Requires Claude CLI and Python 3.9+. When both are available and you have never changed this setting, the proxy turns it on at startup and upgrades an unchanged known older deployment after backing it up. Other existing skills stay untouched until you turn this on: they are moved to claude-proxy/skill-backups/ in your Claude CLI directory before installing the query-only skill. Without the dependencies it stays off and cannot be selected. Turning it off removes the skill only if unchanged and stays off; backups and project caches are kept. Claude Code shows one “No such tool available” line per update; this is expected. Open a new Claude session after changing it.</p>
       <label class="toggle" for="project-memory-enabled"><input id="project-memory-enabled" type="checkbox" disabled> Enable gateway-maintained Project Code Memory</label>
       <p id="project-memory-status" class="status" role="status" aria-live="polite">Loading Project Code Memory status…</p>
     </section>
@@ -237,7 +237,7 @@
       if (projectMemoryMessage) setMessage(element, projectMemoryMessage.text, projectMemoryMessage.kind);
       else if (status.enabled && status.installed) setMessage(element, "On. Claude queries project memory; the gateway maintains it in the background.", "");
       else if (status.enabled) setMessage(element, status.reason || "On, but the query skill is not installed. Turn it off and on again to reinstall.", "");
-      else setMessage(element, status.ready ? "Off." : (status.reason || "Project Code Memory is not ready."), "");
+      else setMessage(element, status.reason || (status.ready ? "Off." : "Project Code Memory is not ready."), "");
     }
     async function configureProjectMemory() {
       const toggle = document.getElementById("project-memory-enabled");
@@ -248,7 +248,8 @@
       try {
         const result = await apiRequest("/api/auth/project-memory/configure", { method: "POST", body: JSON.stringify({ enabled: wanted }) });
         if (result.ok !== true || result.enabled !== wanted) throw new Error("Project Code Memory could not be configured.");
-        projectMemoryMessage = { text: wanted ? "Gateway-maintained Project Code Memory is on. Start a new Claude session to use it." : "Gateway-maintained Project Code Memory is off. Start a new Claude session. Project caches are kept.", kind: "success" };
+        const backup = result.replaced ? " Previous skill backed up to claude-proxy/skill-backups/ in your Claude CLI directory." : "";
+        projectMemoryMessage = { text: wanted ? `Gateway-maintained Project Code Memory is on.${backup} Start a new Claude session to use it.` : "Gateway-maintained Project Code Memory is off. Start a new Claude session. Backups and project caches are kept.", kind: "success" };
       } catch (error) { projectMemoryMessage = { text: error.message || "Project Code Memory could not be configured.", kind: "error" }; toggle.checked = lastProjectMemory?.enabled === true; }
       projectMemoryBusy = false;
       await refreshStatus();

@@ -27,5 +27,48 @@
     "LICENSE",
     "SOURCE.md",
     "SKILL.md"
+  ],
+  "previousDeployments": [
+    {
+      "commit": "ece898a",
+      "method": "install button",
+      "files": {
+        "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+        "references/record-format.md": "ddf0e1bd40d95af333d866d768b96d24f912353bb154562aee8e305c966c49f3",
+        "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
+        "SOURCE.md": "5783eb1ddaefee00d08b93226958cd06dc9b441d82a4fa307515a5a61d3f2879",
+        "SKILL.md": "c66a1a7b1a72e2f48243d59712ee6510cbdaff2fb2557e0865ef8ff8ae1291f2"
+      }
+    },
+    {
+      "commit": "ece898a",
+      "method": "manual copy of the whole bundle",
+      "files": {
+        "SKILL.md": "c66a1a7b1a72e2f48243d59712ee6510cbdaff2fb2557e0865ef8ff8ae1291f2",
+        "README.md": "30f03d36c8e39c260de1f4c120d6b482c689384e328ded670ed75ac411b214cf",
+        "agents/openai.yaml": "467a29a9fcc9f32360ee4a12f7674aa7e70f3880bef642a84e2d3981cd031e21",
+        "references/record-format.md": "ddf0e1bd40d95af333d866d768b96d24f912353bb154562aee8e305c966c49f3",
+        "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+        "tests/test_pcm.py": "c1b7ea400d2d5f5a8fc85bbb65057c10a9edc93f1f832b96951d3a39f5eabc06",
+        "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
+        "SOURCE.md": "5783eb1ddaefee00d08b93226958cd06dc9b441d82a4fa307515a5a61d3f2879",
+        "manifest.json": "451edfabb4f3f320ea3cbb846f6ce8ed267add6d3aa008a46c43c2877b29893d"
+      }
+    },
+    {
+      "commit": "f3fab02",
+      "method": "manual copy of the whole claude-proxy bundle (unchanged through 530542c^)",
+      "files": {
+        "SKILL.md": "c66a1a7b1a72e2f48243d59712ee6510cbdaff2fb2557e0865ef8ff8ae1291f2",
+        "README.md": "736533cee2afc95a136ef92bded42ee09144b0cf473bad7fcb09eb5d3aeea82e",
+        "agents/openai.yaml": "467a29a9fcc9f32360ee4a12f7674aa7e70f3880bef642a84e2d3981cd031e21",
+        "references/record-format.md": "ddf0e1bd40d95af333d866d768b96d24f912353bb154562aee8e305c966c49f3",
+        "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+        "tests/test_pcm.py": "c1b7ea400d2d5f5a8fc85bbb65057c10a9edc93f1f832b96951d3a39f5eabc06",
+        "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
+        "SOURCE.md": "5783eb1ddaefee00d08b93226958cd06dc9b441d82a4fa307515a5a61d3f2879",
+        "manifest.json": "9c0227b8e825ac10f029157c7eecb304b401fd24f47e77bc5d5a5f1cfcdca760"
+      }
+    }
   ]
 }

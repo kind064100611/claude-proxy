@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
+const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 const os = require("os");
 const path = require("path");
 const { createProjectMemoryInstaller, INSTALL_FILES } = require("../lib/project-memory-install");
@@ -18,6 +20,48 @@ function fixture(t, options = {}) {
   return { directory, configRoot, bundleRoot, target, featureFile, dependencies, installer };
 }
 
+function registerPreviousDeployment(f, files, commit = "synthetic-previous-deployment") {
+  const manifestFile = path.join(f.bundleRoot, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+  const deployment = {
+    commit,
+    method: "test fixture",
+    files: Object.fromEntries(Object.entries(files).map(([relative, contents]) => [
+      relative, crypto.createHash("sha256").update(contents).digest("hex"),
+    ])),
+  };
+  manifest.previousDeployments = [...(manifest.previousDeployments || []), deployment];
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+  for (const [relative, contents] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(f.target, relative)), { recursive: true });
+    fs.writeFileSync(path.join(f.target, relative), contents);
+  }
+  return deployment;
+}
+
+const syntheticPreviousFiles = {
+  "SKILL.md": "old full-workflow skill",
+  "SOURCE.md": "old source",
+  "LICENSE": "license",
+  "scripts/pcm.py": "print(1)",
+  "references/record-format.md": "format",
+};
+
+function historicalTarget(f, commit, deployment) {
+  const root = path.resolve(__dirname, "..");
+  const files = {};
+  for (const [relative, expectedHash] of Object.entries(deployment.files)) {
+    const bytes = execFileSync("git", ["show", `${commit}:project-code-memory/${relative}`], { cwd: root, maxBuffer: 8 * 1024 * 1024 });
+    const actualHash = crypto.createHash("sha256").update(bytes).digest("hex");
+    assert.equal(actualHash, expectedHash, `${commit}:${relative}`);
+    const destination = path.join(f.target, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, bytes);
+    files[relative] = bytes;
+  }
+  return files;
+}
+
 test("status/factory are read-only, private install is complete and repeated installs do not write", async (t) => {
   const f = fixture(t);
   assert.equal(fs.existsSync(f.configRoot), false);
@@ -25,6 +69,7 @@ test("status/factory are read-only, private install is complete and repeated ins
   assert.equal(fs.existsSync(f.configRoot), false);
   const result = await f.installer.install();
   assert.equal(result.changed, true);
+  assert.equal(result.replaced, false);
   for (const relative of INSTALL_FILES) {
     const file = path.join(f.target, relative);
     assert.deepEqual(fs.readFileSync(file), fs.readFileSync(path.join(f.bundleRoot, relative)));
@@ -41,25 +86,47 @@ test("status/factory are read-only, private install is complete and repeated ins
   assert.equal(fs.statSync(path.join(f.target, "SKILL.md")).mtimeMs, before.mtimeMs);
 });
 
-test("an upstream-original clone or an older full-workflow install is a conflict and is never touched", async (t) => {
+test("install, uninstall and autoEnable preserve unknown conflicts; explicit enable backs them up", async (t) => {
   for (const kind of ["clone", "older"]) {
     const f = fixture(t);
     fs.cpSync(f.bundleRoot, f.target, { recursive: true });
     if (kind === "clone") {
       fs.mkdirSync(path.join(f.target, ".git"));
+      fs.writeFileSync(path.join(f.target, ".git/HEAD"), "ref: refs/heads/main\n");
       fs.unlinkSync(path.join(f.target, "LICENSE"));
       fs.unlinkSync(path.join(f.target, "SOURCE.md"));
     } else {
       for (const name of fs.readdirSync(f.target)) if (!["scripts", "references", "LICENSE", "SOURCE.md", "SKILL.md"].includes(name)) fs.rmSync(path.join(f.target, name), { recursive: true });
       fs.writeFileSync(path.join(f.target, "SKILL.md"), "older full-workflow skill");
+      fs.writeFileSync(path.join(f.target, "notes.txt"), "user extra");
     }
     const before = fs.readdirSync(f.target).sort();
     assert.equal((await f.installer.getStatus()).state, "conflict");
     await assert.rejects(f.installer.install(), { code: "PROJECT_MEMORY_CONFLICT" });
     await assert.rejects(f.installer.uninstall(), { code: "PROJECT_MEMORY_CONFLICT" });
-    await assert.rejects(f.installer.configure(true), { code: "PROJECT_MEMORY_CONFLICT" });
+    await assert.rejects(f.installer.autoEnable(), { code: "PROJECT_MEMORY_CONFLICT" });
     assert.equal((await f.installer.getStatus()).enabled, false);
     assert.deepEqual(fs.readdirSync(f.target).sort(), before);
+
+    const enabled = await f.installer.configure(true);
+    assert.equal(enabled.enabled, true);
+    assert.equal(enabled.replaced, true);
+    for (const relative of INSTALL_FILES) assert.deepEqual(fs.readFileSync(path.join(f.target, relative)), fs.readFileSync(path.join(f.bundleRoot, relative)));
+    const backups = path.join(f.configRoot, "claude-proxy/skill-backups");
+    const [backup] = fs.readdirSync(backups);
+    assert.deepEqual(fs.readdirSync(path.join(backups, backup)).sort(), before);
+    if (kind === "clone") assert.equal(fs.readFileSync(path.join(backups, backup, ".git/HEAD"), "utf8"), "ref: refs/heads/main\n");
+    else {
+      assert.equal(fs.readFileSync(path.join(backups, backup, "SKILL.md"), "utf8"), "older full-workflow skill");
+      assert.equal(fs.readFileSync(path.join(backups, backup, "notes.txt"), "utf8"), "user extra");
+    }
+    const cache = path.join(f.directory, "project/projectCodeMemory");
+    fs.mkdirSync(cache, { recursive: true });
+    fs.writeFileSync(path.join(cache, "index.json"), "keep project cache");
+    await f.installer.configure(false);
+    assert.equal(fs.existsSync(f.target), false);
+    assert.deepEqual(fs.readdirSync(backups), [backup]);
+    assert.equal(fs.readFileSync(path.join(cache, "index.json"), "utf8"), "keep project cache");
   }
 });
 
@@ -74,6 +141,121 @@ test("missing dependencies, failed probe and damaged bundle cannot create user d
   fs.appendFileSync(path.join(f.bundleRoot, "scripts/pcm.py"), "damaged");
   await assert.rejects(f.installer.install(), { code: "PROJECT_MEMORY_UNAVAILABLE" });
   assert.equal(fs.existsSync(f.configRoot), false);
+});
+
+test("dependency and private-stage failures leave a conflicting skill and backup untouched", async (t) => {
+  const missing = fixture(t, { probe: async () => ({ cli: true, python: null }) });
+  fs.mkdirSync(missing.target, { recursive: true });
+  fs.writeFileSync(path.join(missing.target, "SKILL.md"), "keep missing-dependency conflict");
+  await assert.rejects(missing.installer.configure(true), { code: "PROJECT_MEMORY_UNAVAILABLE" });
+  assert.equal(fs.readFileSync(path.join(missing.target, "SKILL.md"), "utf8"), "keep missing-dependency conflict");
+  assert.equal(fs.existsSync(path.join(missing.configRoot, "claude-proxy/skill-backups")), false);
+  assert.equal(fs.existsSync(missing.featureFile), false);
+
+  const fsImpl = Object.create(fs);
+  fsImpl.writeFileSync = (file, ...args) => {
+    if (file.endsWith("SOURCE.md")) throw new Error("synthetic stage failure");
+    return fs.writeFileSync(file, ...args);
+  };
+  const failed = fixture(t, { fsImpl });
+  fs.mkdirSync(failed.target, { recursive: true });
+  fs.writeFileSync(path.join(failed.target, "SKILL.md"), "keep stage-failure conflict");
+  await assert.rejects(failed.installer.configure(true), { code: "PROJECT_MEMORY_UNAVAILABLE" });
+  assert.equal(fs.readFileSync(path.join(failed.target, "SKILL.md"), "utf8"), "keep stage-failure conflict");
+  assert.equal(fs.existsSync(path.join(failed.configRoot, "claude-proxy/skill-backups")), false);
+  assert.equal(fs.existsSync(failed.featureFile), false);
+});
+
+test("unsafe backup parents never move a conflicting skill", async (t) => {
+  for (const kind of ["proxy-link", "proxy-file", "backup-link", "backup-file"]) {
+    if (kind.endsWith("-link") && process.platform === "win32") continue;
+    const f = fixture(t);
+    fs.mkdirSync(f.target, { recursive: true });
+    fs.writeFileSync(path.join(f.target, "SKILL.md"), `keep ${kind}`);
+    fs.writeFileSync(path.join(f.target, "extra.txt"), "also keep");
+    const privateRoot = path.join(f.configRoot, "claude-proxy");
+    const backupRoot = path.join(privateRoot, "skill-backups");
+    const external = path.join(f.directory, "external-backups");
+    if (kind.startsWith("proxy-")) {
+      if (kind === "proxy-link") {
+        fs.mkdirSync(external);
+        fs.symlinkSync(external, privateRoot);
+      } else fs.writeFileSync(privateRoot, "not a directory");
+    } else {
+      fs.mkdirSync(privateRoot);
+      if (kind === "backup-link") {
+        fs.mkdirSync(external);
+        fs.symlinkSync(external, backupRoot);
+      } else fs.writeFileSync(backupRoot, "not a directory");
+    }
+    await assert.rejects(f.installer.configure(true));
+    assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), `keep ${kind}`);
+    assert.equal(fs.readFileSync(path.join(f.target, "extra.txt"), "utf8"), "also keep");
+    if (fs.existsSync(external)) assert.deepEqual(fs.readdirSync(external), []);
+    assert.equal(fs.existsSync(f.featureFile), false);
+  }
+});
+
+test("explicit enable stages completely before backing up and moves a conflicting symlink itself", async (t) => {
+  if (process.platform === "win32") return;
+  const fsImpl = Object.create(fs);
+  let f;
+  let completeStageSawOriginal = false;
+  fsImpl.writeFileSync = (file, ...args) => {
+    if (path.basename(file) === "SKILL.md" && file.includes(".project-code-memory-stage-")) {
+      completeStageSawOriginal = fs.lstatSync(f.target).isSymbolicLink();
+      assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), "external skill");
+    }
+    return fs.writeFileSync(file, ...args);
+  };
+  f = fixture(t, { fsImpl });
+  const external = path.join(f.directory, "external-skill");
+  fs.mkdirSync(external);
+  fs.writeFileSync(path.join(external, "SKILL.md"), "external skill");
+  fs.mkdirSync(path.dirname(f.target), { recursive: true });
+  fs.symlinkSync(external, f.target);
+  const result = await f.installer.configure(true);
+  assert.equal(result.replaced, true);
+  assert.equal(completeStageSawOriginal, true);
+  const backups = path.join(f.configRoot, "claude-proxy/skill-backups");
+  const [backup] = fs.readdirSync(backups);
+  const savedLink = path.join(backups, backup);
+  assert.equal(fs.lstatSync(savedLink).isSymbolicLink(), true);
+  assert.equal(fs.readlinkSync(savedLink), external);
+  assert.deepEqual(fs.readdirSync(external), ["SKILL.md"]);
+  assert.equal(fs.readFileSync(path.join(external, "SKILL.md"), "utf8"), "external skill");
+});
+
+test("failed publication restores its backup unless even an empty target has appeared", async (t) => {
+  for (const occupied of [false, true]) {
+    const fsImpl = Object.create(fs);
+    let f;
+    fsImpl.renameSync = (from, to) => {
+      if (path.basename(from).startsWith(".project-code-memory-stage-") && to === f.target) {
+        if (occupied) fs.mkdirSync(f.target);
+        throw Object.assign(new Error("synthetic publish failure"), { code: "EIO" });
+      }
+      return fs.renameSync(from, to);
+    };
+    f = fixture(t, { fsImpl });
+    fs.mkdirSync(f.target, { recursive: true });
+    fs.writeFileSync(path.join(f.target, "SKILL.md"), "previous user skill");
+    fs.writeFileSync(path.join(f.target, "extra.txt"), "preserve me");
+    await assert.rejects(f.installer.configure(true), { code: "PROJECT_MEMORY_UNAVAILABLE" });
+    const backups = path.join(f.configRoot, "claude-proxy/skill-backups");
+    if (occupied) {
+      assert.deepEqual(fs.readdirSync(f.target), []);
+      const [backup] = fs.readdirSync(backups);
+      assert.equal(fs.readFileSync(path.join(backups, backup, "SKILL.md"), "utf8"), "previous user skill");
+      assert.equal(fs.readFileSync(path.join(backups, backup, "extra.txt"), "utf8"), "preserve me");
+    } else {
+      assert.deepEqual(fs.readdirSync(f.target).sort(), ["SKILL.md", "extra.txt"]);
+      assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), "previous user skill");
+      assert.equal(fs.readFileSync(path.join(f.target, "extra.txt"), "utf8"), "preserve me");
+      assert.deepEqual(fs.readdirSync(backups), []);
+    }
+    assert.equal(fs.existsSync(f.featureFile), false);
+  }
 });
 
 test("partial, modified and non-directory targets are preserved conflicts", async (t) => {
@@ -270,6 +452,157 @@ test("autoEnable installs and turns on only when the user never chose and instal
   fs.writeFileSync(existing.featureFile, JSON.stringify({ version: 1, onlineSummary: false }));
   assert.equal((await existing.installer.autoEnable()).changed, false);
   assert.deepEqual(JSON.parse(fs.readFileSync(existing.featureFile, "utf8")), { version: 1, onlineSummary: false, projectMemory: true });
+});
+
+test("autoEnable backs up only an exact registered previous deployment", async (t) => {
+  const f = fixture(t);
+  registerPreviousDeployment(f, syntheticPreviousFiles);
+  const result = await f.installer.autoEnable();
+  assert.deepEqual([result.enabled, result.replaced, result.installed], [true, true, true]);
+  assert.equal(JSON.parse(fs.readFileSync(f.featureFile, "utf8")).projectMemory, true);
+  const backups = path.join(f.configRoot, "claude-proxy/skill-backups");
+  const [backup] = fs.readdirSync(backups);
+  for (const [relative, contents] of Object.entries(syntheticPreviousFiles)) {
+    assert.equal(fs.readFileSync(path.join(backups, backup, relative), "utf8"), contents, relative);
+  }
+
+  for (const change of ["modified", "extra file", "extra directory", "turned off"]) {
+    const changed = fixture(t);
+    registerPreviousDeployment(changed, syntheticPreviousFiles);
+    if (change === "modified") fs.appendFileSync(path.join(changed.target, "SKILL.md"), " with user text");
+    else if (change === "extra file") fs.writeFileSync(path.join(changed.target, "notes.md"), "keep");
+    else if (change === "extra directory") fs.mkdirSync(path.join(changed.target, "projectCodeMemory"));
+    else {
+      fs.mkdirSync(path.dirname(changed.featureFile));
+      fs.writeFileSync(changed.featureFile, JSON.stringify({ version: 1, projectMemory: false }));
+    }
+    const before = fs.readFileSync(path.join(changed.target, "SKILL.md"), "utf8");
+    if (change === "turned off") assert.equal(await changed.installer.autoEnable(), null);
+    else await assert.rejects(changed.installer.autoEnable(), { code: "PROJECT_MEMORY_CONFLICT" });
+    assert.equal(fs.readFileSync(path.join(changed.target, "SKILL.md"), "utf8"), before);
+    assert.equal(fs.existsSync(path.join(changed.configRoot, "claude-proxy/skill-backups")), false);
+  }
+});
+
+test("autoEnable upgrades real historical button and whole-bundle targets from git blobs", async (t) => {
+  const cases = [
+    {
+      revision: "f3fab02",
+      deployment: (entry) => entry.commit === "ece898a" && entry.method === "install button",
+    },
+    {
+      revision: "530542c^",
+      deployment: (entry) => entry.commit === "f3fab02" && /whole claude-proxy bundle/.test(entry.method),
+    },
+  ];
+  for (const item of cases) {
+    const f = fixture(t);
+    const manifest = JSON.parse(fs.readFileSync(path.join(f.bundleRoot, "manifest.json"), "utf8"));
+    const deployment = manifest.previousDeployments.find(item.deployment);
+    assert.ok(deployment, `missing manifest entry for ${item.revision}`);
+    const originals = historicalTarget(f, item.revision, deployment);
+    const result = await f.installer.autoEnable();
+    assert.deepEqual([result.enabled, result.replaced, result.installed], [true, true, true]);
+    const backups = path.join(f.configRoot, "claude-proxy/skill-backups");
+    const [backup] = fs.readdirSync(backups);
+    for (const [relative, bytes] of Object.entries(originals)) {
+      assert.deepEqual(fs.readFileSync(path.join(backups, backup, relative)), bytes, `${item.revision}:${relative}`);
+    }
+    for (const relative of INSTALL_FILES) {
+      assert.deepEqual(fs.readFileSync(path.join(f.target, relative)), fs.readFileSync(path.join(f.bundleRoot, relative)));
+    }
+  }
+});
+
+test("explicit enable never backs up a new target created during probe or staging", async (t) => {
+  for (const moment of ["probe", "stage"]) {
+    const fsImpl = Object.create(fs);
+    let f;
+    const appear = () => {
+      fs.mkdirSync(path.dirname(f.target), { recursive: true });
+      fs.mkdirSync(f.target);
+    };
+    if (moment === "stage") fsImpl.writeFileSync = (file, ...args) => {
+      fs.writeFileSync(file, ...args);
+      if (file.endsWith("SOURCE.md")) appear();
+    };
+    f = fixture(t, {
+      fsImpl,
+      probe: async () => { if (moment === "probe") appear(); return { cli: true, python: true }; },
+    });
+    await assert.rejects(f.installer.configure(true), { code: "PROJECT_MEMORY_CONFLICT" });
+    assert.deepEqual(fs.readdirSync(f.target), []);
+    assert.equal(fs.existsSync(path.join(f.configRoot, "claude-proxy/skill-backups")), false);
+    assert.equal(fs.existsSync(f.featureFile), false);
+  }
+});
+
+test("replacement preserves a different target that takes the original skill's place", async (t) => {
+  for (const operation of ["configure", "autoEnable"]) {
+    for (const moment of ["probe", "stage"]) {
+      const fsImpl = Object.create(fs);
+      let f;
+      const moved = () => path.join(f.directory, "externally-moved-skill");
+      const replaceTarget = () => { fs.renameSync(f.target, moved()); fs.mkdirSync(f.target); };
+      if (moment === "stage") fsImpl.writeFileSync = (file, ...args) => {
+        fs.writeFileSync(file, ...args);
+        if (file.endsWith("SOURCE.md")) replaceTarget();
+      };
+      f = fixture(t, { fsImpl, probe: async () => {
+        if (moment === "probe") replaceTarget();
+        return { cli: true, python: true };
+      } });
+      registerPreviousDeployment(f, syntheticPreviousFiles);
+      await assert.rejects(operation === "configure" ? f.installer.configure(true) : f.installer.autoEnable(), { code: "PROJECT_MEMORY_CONFLICT" });
+      assert.deepEqual(fs.readdirSync(f.target), []);
+      assert.equal(fs.readFileSync(path.join(moved(), "SKILL.md"), "utf8"), syntheticPreviousFiles["SKILL.md"]);
+      assert.equal(fs.existsSync(path.join(f.configRoot, "claude-proxy/skill-backups")), false);
+      assert.equal(fs.existsSync(f.featureFile), false);
+    }
+  }
+});
+
+test("automatic upgrade revalidates previous-deployment bytes after probe and staging", async (t) => {
+  for (const moment of ["probe", "stage"]) {
+    const fsImpl = Object.create(fs);
+    let f;
+    const mutate = () => fs.appendFileSync(path.join(f.target, "SKILL.md"), " external edit");
+    if (moment === "stage") fsImpl.writeFileSync = (file, ...args) => {
+      fs.writeFileSync(file, ...args);
+      if (file.endsWith("SOURCE.md")) mutate();
+    };
+    f = fixture(t, {
+      fsImpl,
+      probe: async () => { if (moment === "probe") mutate(); return { cli: true, python: true }; },
+    });
+    registerPreviousDeployment(f, syntheticPreviousFiles);
+    await assert.rejects(f.installer.autoEnable(), { code: "PROJECT_MEMORY_CONFLICT" });
+    assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), `${syntheticPreviousFiles["SKILL.md"]} external edit`);
+    assert.equal(fs.existsSync(path.join(f.configRoot, "claude-proxy/skill-backups")), false);
+    assert.equal(fs.existsSync(f.featureFile), false);
+  }
+});
+
+test("automatic upgrade revalidates a moved backup and rolls back a post-rename edit", async (t) => {
+  const fsImpl = Object.create(fs);
+  let f;
+  let mutated = false;
+  fsImpl.renameSync = (from, to) => {
+    const result = fs.renameSync(from, to);
+    if (!mutated && from === f.target && path.dirname(to) === path.join(f.configRoot, "claude-proxy/skill-backups")) {
+      mutated = true;
+      fs.appendFileSync(path.join(to, "SKILL.md"), " edited during backup move");
+    }
+    return result;
+  };
+  f = fixture(t, { fsImpl });
+  registerPreviousDeployment(f, syntheticPreviousFiles);
+  await assert.rejects(f.installer.autoEnable(), { code: "PROJECT_MEMORY_CONFLICT" });
+  assert.equal(mutated, true);
+  assert.equal(fs.readFileSync(path.join(f.target, "SKILL.md"), "utf8"), `${syntheticPreviousFiles["SKILL.md"]} edited during backup move`);
+  assert.equal(fs.readFileSync(path.join(f.target, "scripts/pcm.py"), "utf8"), syntheticPreviousFiles["scripts/pcm.py"]);
+  assert.deepEqual(fs.readdirSync(path.join(f.configRoot, "claude-proxy/skill-backups")), []);
+  assert.equal(fs.existsSync(f.featureFile), false);
 });
 
 test("autoEnable writes nothing without dependencies, over a conflicting skill or with a malformed configuration", async (t) => {

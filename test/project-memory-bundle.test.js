@@ -60,6 +60,23 @@ test("every deployed file matches its manifest hash and has no unlisted files", 
   assert.deepEqual(actualFiles.sort(), Object.keys(manifest.files).sort());
 });
 
+test("manifest retains real target and source previous-deployment fingerprints", () => {
+  const deployments = manifest.previousDeployments;
+  assert.ok(Array.isArray(deployments));
+  const expected = [
+    { commit: "f3fab02", files: [...Object.keys(manifest.files), "manifest.json"].sort(), method: /530542c\^/ },
+    { commit: "ece898a", files: ["LICENSE", "SKILL.md", "SOURCE.md", "references/record-format.md", "scripts/pcm.py"] },
+    { commit: "ece898a", files: [...Object.keys(manifest.files), "manifest.json"].sort() },
+  ];
+  for (const wanted of expected) {
+    const deployment = deployments.find((entry) => entry.commit.startsWith(wanted.commit) &&
+      Object.keys(entry.files).sort().join("\n") === wanted.files.slice().sort().join("\n"));
+    assert.ok(deployment, `missing previous deployment ${wanted.commit}`);
+    if (wanted.method) assert.match(deployment.method, wanted.method);
+    for (const digest of Object.values(deployment.files)) assert.match(digest, /^[a-f0-9]{64}$/);
+  }
+});
+
 test("core upstream originals are identified and the Python implementation is unmodified", () => {
   for (const relativePath of ["scripts/pcm.py", "references/record-format.md", "SKILL.md"]) {
     assert.match(manifest.upstreamFiles[relativePath], /^[a-f0-9]{64}$/);
