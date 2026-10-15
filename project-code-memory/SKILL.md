@@ -15,7 +15,7 @@ Use this workflow for every code task that will search, read, or modify reposito
 
 Before the first source-symbol/path search or source-content read:
 
-1. If `<root>/projectCodeMemory/` already exists, continue to **Query first**.
+1. If `<root>/projectCodeMemory/` already exists, continue to **Query first**; do not skip the query or its `.gitignore` check just because the cache exists.
 2. Otherwise, count repository-owned source and test file paths without reading their contents. Include tracked and non-ignored untracked files; exclude vendored dependencies, generated files, build outputs, and caches. Stop once the count reaches 11.
 3. If the count is 10 or fewer, bypass this skill for the rest of the task. Do not initialize memory or modify `.gitignore`.
 4. If the count reaches 11, continue to **Query first**; the query will initialize memory when absent.
@@ -33,7 +33,9 @@ python3 -I -B "<absolute-skill-dir>/scripts/pcm.py" query \
 
 Use Python 3.9 or newer. On macOS, use `python3 -I -B`; on Windows, use `python -I -B` or `py -3 -I -B`. Resolve `<absolute-skill-dir>` to the installed `~/.claude/skills/project-code-memory` directory (or `skills/project-code-memory` under the actual `CLAUDE_CONFIG_DIR` root); quote the absolute script path if it contains spaces. Do not depend on the current working directory.
 
-Use `--limit 1` for a focused question or one flow; raise it to at most `3` only when the task genuinely spans independent topics. Add `--locate` for code changes and reviews: it returns current `path:line` matches for saved symbols. `query` initializes memory when absent, creating the target `projectCodeMemory/` cache, ensures the root `.gitignore` contains `/projectCodeMemory/`, validates matching fingerprints, and prunes matched stale or malformed records.
+Use `--limit 1` for a focused question or one flow; raise it to at most `3` only when the task genuinely spans independent topics. Add `--locate` for code changes and reviews: it returns current `path:line` matches for saved symbols. `query` initializes memory when absent, creating the target `projectCodeMemory/` cache, validates matching fingerprints, and prunes matched stale or malformed records.
+
+Whether `projectCodeMemory/` is newly created or already exists, you must ensure the root `.gitignore` contains `/projectCodeMemory/`; append the rule if missing. Reuse the existing `pcm.py query` path (`_init_memory` → `ensure_ignored`), which checks and adds the rule on every query, including when the cache already exists. This does not override the small-project bypass above. Do not remove already tracked files from Git's index.
 
 Query again only when discovery exposes a genuinely new symbol or subsystem that could match a different record. Do not loop over paraphrased queries.
 
