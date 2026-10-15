@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createSummaryModel, pickModels, numberedInput, parseSummary, MAX_INPUT_BYTES } = require("../lib/summary-model");
+const { createSummaryModel, pickModels, numberedInput, parseSummary, MAX_INPUT_BYTES, DEFAULT_PROMPT } = require("../lib/summary-model");
 
 const catalog = (ids) => async () => ({ object: "list", data: ids.map((id) => ({ id })) });
 const reply = JSON.stringify({ summary: "build failed", highlights: [{ start: 2, end: 2, reason: "error" }] });
@@ -112,4 +112,23 @@ test("default model and selectable list come from the catalog without failing th
   const broken = createSummaryModel({ getAvailableModels: async () => { throw new Error("offline"); } });
   assert.equal(await broken.getDefaultModel(), null);
   assert.deepEqual(await broken.listModels(), []);
+});
+
+test("a saved custom prompt replaces the built-in system prompt for GPT and Claude, and null restores it", async () => {
+  let prompt = "Custom summary prompt.";
+  const systems = [];
+  const { summarize } = createSummaryModel({ getAvailableModels: catalog(["gpt-6-luna", "claude-haiku-5.5"]), getPrompt: () => prompt,
+    requestResponsesImpl: async (body) => { systems.push(body.messages[0].content); throw Object.assign(new Error("busy"), { status: 429 }); },
+    loadClaudeAuth: async () => ({ baseUrl: "https://copilot.test", token: "t" }),
+    fetchImpl: async (url, options) => {
+      systems.push(JSON.parse(options.body).system);
+      return { ok: true, json: async () => ({ content: [{ type: "text", text: reply }] }) };
+    } });
+  assert.equal((await summarize("a\nb", null)).model, "claude-haiku-5.5");
+  assert.deepEqual(systems, [prompt, prompt]);
+  prompt = null;
+  systems.length = 0;
+  await summarize("a\nb", null);
+  assert.deepEqual(systems, [DEFAULT_PROMPT, DEFAULT_PROMPT]);
+  assert.match(DEFAULT_PROMPT, /Reply with JSON only/);
 });

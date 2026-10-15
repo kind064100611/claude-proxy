@@ -7,12 +7,13 @@ const { selectModel, toGatewayModels } = require("../lib/model-routing");
 const { createModelDiscovery } = require("../lib/model-discovery");
 const { isClaudeModel, forwardClaudeRequest } = require("../lib/github-copilot");
 const { createOnlineSummary, createSummarySettings } = require("../lib/online-summary");
-const { createSummaryModel } = require("../lib/summary-model");
+const { createSummaryModel, DEFAULT_PROMPT: DEFAULT_SUMMARY_PROMPT } = require("../lib/summary-model");
 const { defaultStore: credentialStore } = require("../lib/credential-store");
 const { createAuthRouter } = require("../lib/auth-server");
 const { createClaudeSetup, getClaudeConfigRoot } = require("../lib/claude-setup");
 const { createMacosService } = require("../lib/macos-service");
 const { createProjectMemoryInstaller } = require("../lib/project-memory-install");
+const { createCodingDisciplineInstaller } = require("../lib/coding-discipline-install");
 
 const PORT = 8082;
 const getAvailableModels = createModelDiscovery({
@@ -22,6 +23,7 @@ const summaryModel = createSummaryModel({
   getAvailableModels,
   // 页面选择的模型每次请求重新读取，修改无需重启代理。
   getPreferredModel: () => onlineSummary.getStatus().summaryModel,
+  getPrompt: () => onlineSummary.getStatus().summaryPrompt,
   onEvent: (details) => logEvent("online-summary", "Tool output summarized", details),
   onWarning: (details) => logWarn("online-summary", "Summary model failed", details)
 });
@@ -871,9 +873,11 @@ const authRouter = createAuthRouter({
   port: PORT,
   macosService,
   projectMemory: createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() }),
+  codingDiscipline: createCodingDisciplineInstaller({ configRoot: getClaudeConfigRoot() }),
   store: credentialStore,
   setup: createClaudeSetup({ store: credentialStore, getAvailableModels }),
-  summarySettings: createSummarySettings({ getDefaultModel: summaryModel.getDefaultModel, listModels: summaryModel.listModels }),
+  summarySettings: createSummarySettings({ getDefaultModel: summaryModel.getDefaultModel, listModels: summaryModel.listModels,
+    defaultPrompt: DEFAULT_SUMMARY_PROMPT }),
   onCredentialsChanged: () => getAvailableModels.invalidate()
 });
 
@@ -1029,6 +1033,13 @@ process.once("SIGTERM", shutdownProxy);
 process.once("SIGINT", shutdownProxy);
 credentialStore.migrate({ onWarning: (message) => console.warn(message) });
 getAvailableModels().catch((error) => console.warn(`Model discovery failed: ${error.message}`));
+// 启动时和之后每小时删除超过保留天数未使用的会话归档；页面修改天数后在下一次检查生效。
+const cleanupObservationArchives = () => {
+  const removed = onlineSummary.cleanup();
+  if (removed) logEvent("online-summary", "Online summary archive cleanup", { removed_sessions: removed });
+};
+cleanupObservationArchives();
+setInterval(cleanupObservationArchives, 60 * 60 * 1000).unref();
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`claude-proxy running on http://127.0.0.1:${PORT}`);

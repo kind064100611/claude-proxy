@@ -52,7 +52,7 @@ test("feature toggle defaults on in user HOME, CLI preserves other fields, and r
   const modulePath = path.resolve(__dirname, "../lib/online-summary");
   const scriptPath = path.resolve(__dirname, "../scripts/toggle-online-summary.js");
   const read = () => JSON.parse(execFileSync(process.execPath, ["-e", `const p = require(${JSON.stringify(modulePath)}); console.log(JSON.stringify({file:p.getFeatureConfigPath(),status:p.createOnlineSummary().getStatus()}));`], { cwd: home, env, encoding: "utf8" }));
-  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 16384 } });
+  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 16384, summaryPrompt: null, archiveRetentionDays: 30 } });
   execFileSync(process.execPath, [scriptPath, "status"], { cwd: home, env });
   assert.equal(fs.existsSync(path.dirname(filename)), false);
   fs.mkdirSync(path.dirname(filename), { mode: 0o700 });
@@ -323,11 +323,12 @@ test("summary model selection persists, is validated and can return to automatic
   let models = ["claude-haiku-5.5", "gpt-6-luna"];
   const settings = createSummarySettings({ configFile: filename, getDefaultModel: async () => "gpt-6-luna", listModels: async () => models });
   const thresholds = [4096, 8192, 16384, 32768];
-  assert.deepEqual(await settings.getStatus(), { enabled: true, model: null, defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds });
+  const prompts = { prompt: "", customPrompt: false, retentionDays: 30, retentionOptions: [7, 14, 30, 60, 90, 0] };
+  assert.deepEqual(await settings.getStatus(), { enabled: true, model: null, defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds, ...prompts });
   assert.equal(fs.existsSync(filename), false);
-  assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds });
+  assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds, ...prompts });
   await settings.configure({ onlineSummary: false, summaryThreshold: 8192 });
-  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192 });
+  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30 });
   await assert.rejects(settings.configure({ summaryThreshold: 1000 }), { code: "INVALID_SUMMARY_THRESHOLD" });
   await assert.rejects(settings.configure({ summaryModel: "not-listed" }), { code: "UNKNOWN_SUMMARY_MODEL" });
   assert.equal(getStatus(filename).summaryModel, "claude-haiku-5.5");
@@ -338,11 +339,40 @@ test("summary model selection persists, is validated and can return to automatic
   assert.throws(() => setFeatures({ onlineSummary: "yes" }, filename));
   assert.throws(() => setFeatures({ summaryModel: "bad model id" }, filename));
   fs.writeFileSync(filename, JSON.stringify({ version: 1, summaryModel: "bad model id", summaryThreshold: 5000 }));
-  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 16384 });
+  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 16384, summaryPrompt: null, archiveRetentionDays: 30 });
   assert.equal(fs.existsSync(path.join(home, "other-cli-root")), false);
 });
 
-test("configuration events report the enabled state and summary model choice", async (t) => {
+test("a custom summary prompt persists, is validated, and resetting or saving the default removes it", async (t) => {
+  const { filename } = featureFixture(t);
+  const defaultPrompt = "Built-in prompt.\nReply with JSON only.";
+  const settings = createSummarySettings({ configFile: filename, getDefaultModel: async () => null, listModels: async () => [], defaultPrompt });
+  const initial = await settings.getStatus();
+  assert.deepEqual({ prompt: initial.prompt, customPrompt: initial.customPrompt }, { prompt: defaultPrompt, customPrompt: false });
+  const custom = "自定义提示词。\nReply with JSON only.";
+  const saved = await settings.configure({ summaryPrompt: custom });
+  assert.deepEqual({ prompt: saved.prompt, customPrompt: saved.customPrompt }, { prompt: custom, customPrompt: true });
+  assert.equal(getStatus(filename).summaryPrompt, custom);
+  for (const invalid of ["", "  \n ", "x".repeat(8 * 1024 + 1), "汉".repeat(2731), '"'.repeat(4096), "\u0001".repeat(1366)]) {
+    await assert.rejects(settings.configure({ summaryPrompt: invalid }), { code: "INVALID_SUMMARY_PROMPT" });
+    assert.throws(() => setFeatures({ summaryPrompt: invalid }, filename));
+  }
+  assert.equal(getStatus(filename).summaryPrompt, custom);
+  await settings.configure({ summaryPrompt: null });
+  assert.deepEqual(JSON.parse(fs.readFileSync(filename, "utf8")), { version: 1 });
+  assert.equal((await settings.getStatus()).prompt, defaultPrompt);
+  await settings.configure({ summaryPrompt: custom });
+  await settings.configure({ summaryPrompt: `\n${defaultPrompt}  ` });
+  assert.equal(getStatus(filename).summaryPrompt, null);
+  assert.equal((await settings.getStatus()).customPrompt, false);
+  // 手工写入的空白或超长提示词被忽略，回到默认值。
+  for (const summaryPrompt of [" ", "x".repeat(8 * 1024 + 1), 42]) {
+    fs.writeFileSync(filename, JSON.stringify({ version: 1, summaryPrompt }));
+    assert.equal(getStatus(filename).summaryPrompt, null);
+  }
+});
+
+test("configuration events report the enabled state, summary model and prompt choice", async (t) => {
   const { root, archiveRoot } = fixture(t);
   const events = [];
   const configFile = path.join(root, "gateway-features.json");
@@ -351,8 +381,11 @@ test("configuration events report the enabled state and summary model choice", a
   pack.getStatus();
   setFeatures({ summaryModel: "claude-haiku-5.5" }, configFile);
   pack.getStatus();
-  assert.deepEqual(events, [{ event: "configuration", enabled: true, summary_model: "auto", summary_threshold: 16384 },
-    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 16384 }]);
+  setFeatures({ summaryPrompt: "private custom prompt" }, configFile);
+  pack.getStatus();
+  assert.deepEqual(events, [{ event: "configuration", enabled: true, summary_model: "auto", summary_threshold: 16384, summary_prompt: "default", archive_retention_days: 30 },
+    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 16384, summary_prompt: "default", archive_retention_days: 30 },
+    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 16384, summary_prompt: "custom", archive_retention_days: 30 }]);
 });
 
 test("the configured threshold decides which outputs are summarized and weak compression keeps the original", async (t) => {
@@ -374,4 +407,103 @@ test("the configured threshold decides which outputs are summarized and weak com
   assert.equal(weak.stats.summarized_results, 0);
   assert.equal(lastText(weak.body), short);
   assert.deepEqual(warnings, []);
+});
+
+test("cleanup deletes only expired session archives this module wrote and honors the configured retention", async (t) => {
+  const { root, archiveRoot, pack } = fixture(t);
+  const configFile = path.join(root, "gateway-features.json");
+  const day = 24 * 60 * 60 * 1000;
+  const age = (target, days) => { const time = new Date(Date.now() - days * day); fs.utimesSync(target, time, time); };
+  const ageSession = (directory, days) => { for (const name of fs.readdirSync(directory)) age(path.join(directory, name), days); age(directory, days); };
+  const base = initial("expiring-session");
+  await pack.prepare(base);
+  assert.match(lastText((await pack.prepare(addResult(base, "one"))).body), /Gateway online summary/);
+  const [expired] = fs.readdirSync(archiveRoot).map((name) => path.join(archiveRoot, name));
+  assert.equal(fs.readdirSync(expired).length, 2);
+
+  const session = (name, files, days) => {
+    const directory = path.join(archiveRoot, name);
+    fs.mkdirSync(directory);
+    for (const file of files) fs.writeFileSync(path.join(directory, file), "{}");
+    ageSession(directory, days);
+    return directory;
+  };
+  const recent = session("a".repeat(64), ["state.json"], 1);
+  const activeLedger = session("b".repeat(64), ["state.json"], 40);
+  age(path.join(activeLedger, "state.json"), 1);
+  const unexpected = session("c".repeat(64), ["state.json", "notes.md"], 40);
+  const unnamed = session("keep-me", ["state.json"], 40);
+  fs.writeFileSync(path.join(archiveRoot, "e".repeat(64)), "not a directory");
+  ageSession(expired, 31);
+
+  assert.equal(pack.cleanup(), 1);
+  assert.equal(fs.existsSync(expired), false);
+  for (const directory of [recent, activeLedger, unnamed]) assert.deepEqual(fs.readdirSync(directory), ["state.json"]);
+  assert.deepEqual(fs.readdirSync(unexpected).sort(), ["notes.md", "state.json"]);
+  assert.ok(fs.statSync(path.join(archiveRoot, "e".repeat(64))).isFile());
+  // A resumed session without its archive falls back to the original output.
+  assert.equal(lastText((await pack.prepare(addResult(base, "one"))).body), large);
+
+  setFeatures({ archiveRetentionDays: 0 }, configFile);
+  ageSession(recent, 1000);
+  assert.equal(pack.cleanup(), 0);
+  setFeatures({ archiveRetentionDays: 7 }, configFile);
+  ageSession(recent, 8);
+  assert.equal(pack.cleanup(), 1);
+  assert.equal(fs.existsSync(recent), false);
+  assert.throws(() => setFeatures({ archiveRetentionDays: 5 }, configFile));
+  const settings = createSummarySettings({ configFile, getDefaultModel: async () => null, listModels: async () => [] });
+  await assert.rejects(settings.configure({ archiveRetentionDays: 365 }), { code: "INVALID_RETENTION_DAYS" });
+  assert.equal((await settings.configure({ archiveRetentionDays: 60 })).retentionDays, 60);
+
+  fs.writeFileSync(configFile, "{broken");
+  ageSession(activeLedger, 1000);
+  assert.equal(pack.cleanup(), 0);
+  assert.equal(fs.existsSync(activeLedger), true);
+});
+
+test("cleanup never follows symlinked archive roots or session directories", { skip: process.platform === "win32" }, async (t) => {
+  const { root, archiveRoot, pack } = fixture(t);
+  const external = path.join(root, "external");
+  const old = new Date(Date.now() - 1000 * 24 * 60 * 60 * 1000);
+  fs.mkdirSync(external);
+  fs.writeFileSync(path.join(external, "state.json"), "{}");
+  fs.utimesSync(path.join(external, "state.json"), old, old);
+  fs.utimesSync(external, old, old);
+  fs.mkdirSync(archiveRoot);
+  fs.symlinkSync(external, path.join(archiveRoot, "d".repeat(64)));
+  assert.equal(pack.cleanup(), 0);
+  assert.deepEqual(fs.readdirSync(external), ["state.json"]);
+  const linkedRoot = path.join(root, "linked-root");
+  fs.mkdirSync(path.join(external, "f".repeat(64)));
+  fs.utimesSync(path.join(external, "f".repeat(64)), old, old);
+  fs.symlinkSync(external, linkedRoot);
+  const linked = createOnlineSummary({ configFile: path.join(root, "gateway-features.json"), archiveRoot: linkedRoot });
+  assert.equal(linked.cleanup(), 0);
+  assert.equal(fs.existsSync(path.join(external, "f".repeat(64))), true);
+});
+
+test("cleanup keeps sessions that are still used, ignores invalid retention values and unsafe roots", { skip: process.platform === "win32" }, async (t) => {
+  const { root, archiveRoot, pack } = fixture(t);
+  const configFile = path.join(root, "gateway-features.json");
+  const old = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+  const base = addResult(initial("active-session"), "one");
+  await pack.prepare(initial("active-session"));
+  await pack.prepare(base);
+  const [directory] = fs.readdirSync(archiveRoot).map((name) => path.join(archiveRoot, name));
+  const ageAll = () => { for (const name of fs.readdirSync(directory)) fs.utimesSync(path.join(directory, name), old, old); fs.utimesSync(directory, old, old); };
+  ageAll();
+  // A request without new tool results still marks the session as used.
+  await pack.prepare(base);
+  assert.equal(pack.cleanup(), 0);
+  ageAll();
+  await pack.prepare(base, { readOnly: true });
+  fs.writeFileSync(configFile, JSON.stringify({ version: 1, archiveRetentionDays: 5 }));
+  assert.equal(getStatus(configFile).archiveRetentionDays, 0);
+  assert.equal(pack.cleanup(), 0);
+  fs.writeFileSync(configFile, JSON.stringify({ version: 1 }));
+  fs.chmodSync(archiveRoot, 0o770);
+  assert.equal(pack.cleanup(), 0);
+  fs.chmodSync(archiveRoot, 0o700);
+  assert.equal(pack.cleanup(), 1);
 });

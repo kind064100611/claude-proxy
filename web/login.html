@@ -39,7 +39,7 @@
     .toggle { display: flex; align-items: center; gap: 10px; font-weight: 650; margin: 12px 0; }
     .toggle input { width: 20px; height: 20px; margin: 0; }
     select { width: 100%; min-height: 44px; border: 1px solid #aab5c6; border-radius: 8px; padding: 8px 12px; background: Canvas; color: CanvasText; font: inherit; }
-    select:disabled, .toggle input:disabled { opacity: .62; cursor: not-allowed; }
+    select:disabled, textarea:disabled, .toggle input:disabled { opacity: .62; cursor: not-allowed; }
     textarea { width: 100%; min-height: 130px; resize: vertical; border: 1px solid #aab5c6; border-radius: 8px; padding: 12px; background: Canvas; color: CanvasText; font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
     .hint, .footnote { color: #526176; font-size: .92rem; }
     .summary { border-radius: 8px; background: #eef3fb; padding: 12px; overflow-wrap: anywhere; }
@@ -120,6 +120,14 @@
       <button id="project-memory-install" type="button" disabled>Install Project Code Memory</button>
     </section>
 
+    <section class="card" aria-labelledby="coding-discipline-heading">
+      <h2 id="coding-discipline-heading">Install Coding Discipline</h2>
+      <p>Install the bundled coding-discipline skill (MIT, adapted from andrej-karpathy-skills) into your Claude CLI skills directory. Requires Claude CLI; install it manually first. Existing different versions are never overwritten.</p>
+      <p>Skill use is model-driven, not a hook. Open a new Claude session after installation.</p>
+      <p id="coding-discipline-status" class="status" role="status" aria-live="polite">Loading installation status…</p>
+      <button id="coding-discipline-install" type="button" disabled>Install Coding Discipline</button>
+    </section>
+
     <section class="card" aria-labelledby="statusline-heading">
       <h2 id="statusline-heading">Configure Statusline</h2>
       <p>Replaces the current statusLine command, backing it up, and keeps unrelated plugins unchanged. Requires Claude CLI, Bash 3+, jq 1.6+, and Node.js 18+ (Git Bash on Windows); login is not required.</p>
@@ -136,6 +144,16 @@
       <label for="online-summary-threshold">Summarize outputs of at least</label>
       <select id="online-summary-threshold" disabled></select>
       <p class="hint">Lower thresholds summarize more outputs and save more tokens, but each summary adds a few seconds.</p>
+      <label for="online-summary-retention">Delete archived originals after</label>
+      <select id="online-summary-retention" disabled></select>
+      <p class="hint">Session archives in ~/.claude/gateway-observations not used for this long are deleted at proxy start and hourly, even while Online Summary is off. Resuming such a session later sends its earlier tool outputs in full.</p>
+      <label for="online-summary-prompt">Summary prompt</label>
+      <textarea id="online-summary-prompt" rows="12" spellcheck="false" disabled></textarea>
+      <p class="hint">Sent to the summary model as its system prompt. Its reply must stay JSON with summary and highlights; otherwise summaries fail and the original output is kept. Reset restores the built-in prompt.</p>
+      <div class="row">
+        <button id="online-summary-prompt-save" type="button" disabled>Save prompt</button>
+        <button id="online-summary-prompt-reset" class="secondary" type="button" disabled>Reset to default</button>
+      </div>
       <p id="online-summary-status" class="status" role="status" aria-live="polite">Loading Online Summary settings…</p>
     </section>
 
@@ -175,7 +193,7 @@
         });
         if (response.status === 202 && path === "/api/auth/macos/service/configure") return { ...(await response.json()), _httpStatus: 202 };
         if (!response.ok) {
-          if (path.endsWith("/configure") || path.endsWith("/project-memory/install")) {
+          if (path.endsWith("/configure") || path.endsWith("/project-memory/install") || path.endsWith("/coding-discipline/install")) {
             const failure = await response.json();
             const fields = Array.isArray(failure.fields) ? ` ${failure.fields.join(", ")}` : "";
             throw Object.assign(new Error(`${failure.error || "Unable to configure. Please try again."}${fields}`), { httpStatus: response.status });
@@ -198,6 +216,7 @@
       renderSetupStatus("cli", status.claudeCli || {});
       renderSetupStatus("statusline", status.statusline || {});
       renderProjectMemory(status.projectMemory || {});
+      renderCodingDiscipline(status.codingDiscipline || {});
       renderOnlineSummary(status.onlineSummary || {});
       renderMacosService(status.macosService || {});
       const service = status.macosService;
@@ -231,9 +250,35 @@
       await refreshStatus();
     }
 
+    let codingDisciplineBusy = false;
+    let codingDisciplineMessage = null;
+    function renderCodingDiscipline(status) {
+      const button = document.getElementById("coding-discipline-install");
+      const element = document.getElementById("coding-discipline-status");
+      button.disabled = codingDisciplineBusy || status.ready !== true || status.installed === true;
+      if (codingDisciplineMessage) setMessage(element, codingDisciplineMessage.text, codingDisciplineMessage.kind);
+      else if (status.installed) setMessage(element, "Coding Discipline is installed. Start a new Claude session to use it.", "success");
+      else setMessage(element, status.ready ? "Ready to install Coding Discipline." : (status.reason || "Coding Discipline is not ready to install."), "");
+    }
+    async function installCodingDiscipline() {
+      if (codingDisciplineBusy || document.getElementById("coding-discipline-install").disabled) return;
+      codingDisciplineBusy = true; codingDisciplineMessage = null; renderCodingDiscipline({ ready: true });
+      const button = document.getElementById("coding-discipline-install");
+      button.textContent = "Installing…"; button.classList.add("busy");
+      try {
+        const result = await apiRequest("/api/auth/coding-discipline/install", { method: "POST", body: "{}" });
+        if (result.ok !== true || result.installed !== true) throw new Error("Coding Discipline installation could not be confirmed.");
+        codingDisciplineMessage = { text: result.changed ? "Coding Discipline installed. Start a new Claude session to use it." : "Coding Discipline is already installed. Start a new Claude session to use it.", kind: "success" };
+      } catch (error) { codingDisciplineMessage = { text: error.message || "Coding Discipline installation failed.", kind: "error" }; }
+      codingDisciplineBusy = false; button.classList.remove("busy"); button.textContent = "Install Coding Discipline";
+      await refreshStatus();
+    }
+
     let onlineSummaryBusy = false;
     let onlineSummaryMessage = null;
     let lastOnlineSummary = {};
+    // Unsaved prompt edits survive status refreshes triggered by other cards.
+    let onlineSummaryPromptEdited = false;
     // The select is disabled while the toggle is off; it defaults to the detected cheap model until the user saves a choice.
     function renderOnlineSummary(settings) {
       lastOnlineSummary = settings;
@@ -264,12 +309,28 @@
       toggle.disabled = onlineSummaryBusy || !available;
       select.disabled = onlineSummaryBusy || !available || !toggle.checked || !models.length;
       thresholdSelect.disabled = onlineSummaryBusy || !available || !toggle.checked || !thresholds.length;
+      // Retention also applies to existing archives while summaries are off.
+      const retentionSelect = document.getElementById("online-summary-retention");
+      const retentionOptions = Array.isArray(settings.retentionOptions) ? settings.retentionOptions.filter((days) => Number.isSafeInteger(days) && days >= 0) : [];
+      retentionSelect.replaceChildren(...retentionOptions.map((days) => {
+        const option = document.createElement("option");
+        option.value = String(days);
+        option.textContent = days ? `${days} days without use` : "Never (keep all archives)";
+        return option;
+      }));
+      retentionSelect.value = String(settings.retentionDays ?? "");
+      retentionSelect.disabled = onlineSummaryBusy || !available || !retentionOptions.length;
+      const prompt = document.getElementById("online-summary-prompt");
+      if (!onlineSummaryPromptEdited) prompt.value = typeof settings.prompt === "string" ? settings.prompt : "";
+      for (const id of ["online-summary-prompt", "online-summary-prompt-save", "online-summary-prompt-reset"]) {
+        document.getElementById(id).disabled = onlineSummaryBusy || !available || !toggle.checked;
+      }
       if (onlineSummaryBusy) return;
       if (onlineSummaryMessage) setMessage(element, onlineSummaryMessage.text, onlineSummaryMessage.kind);
       else if (!available) setMessage(element, "Online Summary settings are unavailable.", "error");
       else if (!toggle.checked) setMessage(element, "Online Summary is off. Large tool outputs are sent unchanged.", "");
       else if (!selected) setMessage(element, "Online Summary is on, but no summary model is available yet. Log in to ChatGPT or Copilot.", "error");
-      else setMessage(element, `Online Summary is on. Summary model: ${selected}${settings.model ? "" : " (detected automatically)"}; threshold: ${settings.threshold / 1024} KiB.`, "success");
+      else setMessage(element, `Online Summary is on. Summary model: ${selected}${settings.model ? "" : " (detected automatically)"}; threshold: ${settings.threshold / 1024} KiB; prompt: ${settings.customPrompt ? "custom" : "default"}.`, "success");
     }
     async function saveOnlineSummary(change) {
       if (onlineSummaryBusy) return;
@@ -280,7 +341,8 @@
       try {
         const result = await apiRequest("/api/auth/online-summary/configure", { method: "POST", body: JSON.stringify(change) });
         if (result.success !== true) throw new Error("Online Summary settings were not saved.");
-        onlineSummaryMessage = { text: "Saved. Applies to new tool outputs without restarting the proxy.", kind: "success" };
+        if ("prompt" in change) onlineSummaryPromptEdited = false;
+        onlineSummaryMessage = { text: `${change.prompt === null ? "Prompt reset to the default." : "Saved."} Applies to new tool outputs without restarting the proxy.`, kind: "success" };
       } catch (error) {
         onlineSummaryMessage = { text: error.message || "Online Summary settings could not be saved.", kind: "error" };
       }
@@ -448,11 +510,15 @@
         document.getElementById("macos-service-configure").disabled = true;
         setMessage(document.getElementById("macos-service-status"), "Unable to load macOS service status. Configuration is disabled.", "error");
         document.getElementById("project-memory-install").disabled = true;
+        document.getElementById("coding-discipline-install").disabled = true;
         document.getElementById("online-summary-enabled").disabled = true;
         document.getElementById("online-summary-model").disabled = true;
         document.getElementById("online-summary-threshold").disabled = true;
+        document.getElementById("online-summary-retention").disabled = true;
+        for (const id of ["online-summary-prompt", "online-summary-prompt-save", "online-summary-prompt-reset"]) document.getElementById(id).disabled = true;
         if (!onlineSummaryMessage) setMessage(document.getElementById("online-summary-status"), "Unable to load Online Summary settings.", "error");
         if (!projectMemoryMessage) setMessage(document.getElementById("project-memory-status"), "Unable to load Project Code Memory status. Installation is disabled.", "error");
+        if (!codingDisciplineMessage) setMessage(document.getElementById("coding-discipline-status"), "Unable to load Coding Discipline status. Installation is disabled.", "error");
       }
     }
 
@@ -601,8 +667,15 @@
       saveOnlineSummary({ model: document.getElementById("online-summary-model").value }));
     document.getElementById("online-summary-threshold").addEventListener("change", () =>
       saveOnlineSummary({ threshold: Number(document.getElementById("online-summary-threshold").value) }));
+    document.getElementById("online-summary-retention").addEventListener("change", () =>
+      saveOnlineSummary({ retentionDays: Number(document.getElementById("online-summary-retention").value) }));
+    document.getElementById("online-summary-prompt").addEventListener("input", () => { onlineSummaryPromptEdited = true; });
+    document.getElementById("online-summary-prompt-save").addEventListener("click", () =>
+      saveOnlineSummary({ prompt: document.getElementById("online-summary-prompt").value }));
+    document.getElementById("online-summary-prompt-reset").addEventListener("click", () => saveOnlineSummary({ prompt: null }));
     document.getElementById("macos-service-configure").addEventListener("click", configureMacosService);
     document.getElementById("project-memory-install").addEventListener("click", installProjectMemory);
+    document.getElementById("coding-discipline-install").addEventListener("click", installCodingDiscipline);
 
     for (const provider of providers) {
       document.getElementById(`${provider}-start`).addEventListener("click", () => startLogin(provider));

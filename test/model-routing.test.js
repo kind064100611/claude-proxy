@@ -64,3 +64,22 @@ test("discovery list passes Claude filter while displaying original IDs", () => 
   assert.equal(result.data[1].description, "GitHub Copilot");
   assert.equal(original.data[0].id, "gpt-5.4");
 });
+
+test("a catalog context window decides the 1m suffix, so Haiku 4.5 stays at its 200K window", () => {
+  const limits = (tokens) => ({ capabilities: { limits: { max_context_window_tokens: tokens } } });
+  const result = toGatewayModels({ data: [{ id: "claude-haiku-4.5", ...limits(200000) }, { id: "claude-haiku-5.5", ...limits(1000000) },
+    { id: "claude-opus-5.5" }, { id: "qwen/qwen3-coder", ...limits(1000000) }] });
+  assert.deepEqual(result.data.map((model) => model.display_name), ["claude-haiku-4.5", "claude-haiku-5.5[1m]", "claude-opus-5.5[1m]", "qwen/qwen3-coder[1m]"]);
+  assert.equal(selectModel(result.data[0].id, "unused"), "claude-haiku-4.5");
+});
+
+test("only valid positive catalog limits override family rules and preexisting suffixes", () => {
+  const model = (id, tokens) => toGatewayModels({ data: [{ id, capabilities: { limits: { max_context_window_tokens: tokens } } }] }).data[0];
+  for (const invalid of [undefined, null, 0, -1, NaN, Infinity, "200000", 1.5]) {
+    assert.equal(model("claude-haiku-4.5", invalid).display_name, "claude-haiku-4.5[1m]");
+    assert.equal(model("unsupported-model", invalid).display_name, "unsupported-model");
+  }
+  assert.equal(model("claude-haiku-4.5[1m]", 200000).display_name, "claude-haiku-4.5");
+  assert.equal(model("gpt-6-luna", 999999).display_name, "gpt-6-luna");
+  assert.equal(model("gpt-6-luna[1m]", 1000000).display_name, "gpt-6-luna[1m]");
+});

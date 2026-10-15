@@ -230,6 +230,54 @@ test("Project Code Memory status failure is isolated and installer errors are sa
   assert.equal(result.status, 409); assert.ok(!result.text.includes("private"));
 });
 
+test("Coding Discipline API applies local guards, safe status, and fixed failure mapping", async (t) => {
+  let installs = 0;
+  const service = { getStatus: async () => ({ installed: false, ready: true, state: "absent", reason: "unsafe-reason", notice: "unsafe-value", secret: "/private" }), install: async () => { installs++; return { ok: true, changed: true, installed: true, ready: true, state: "installed", secret: "/private" }; } };
+  const { api, port, router, nonce } = await fixture(t, { codingDiscipline: service });
+  const route = "/api/auth/coding-discipline/install";
+  let remoteStatus;
+  await router({ url: route, method: "POST", headers: { host: `localhost:${port}`, "x-auth-nonce": nonce },
+    socket: { remoteAddress: "192.0.2.1" } }, { setHeader() {}, writeHead(code) { remoteStatus = code; }, end() {} });
+  assert.equal(remoteStatus, 403);
+  const statusText = (await api("/api/auth/status")).text;
+  assert.deepEqual(Object.keys(JSON.parse(statusText).codingDiscipline).sort(), ["installed", "notice", "ready", "reason", "state"]);
+  assert.ok(!statusText.includes("/private") && !statusText.includes("unsafe-"));
+  for (const headers of [{ "X-Auth-Nonce": "wrong" }, { Origin: "https://evil.example" }, { "Content-Type": "text/plain" }]) assert.equal((await api(route, { method: "POST", body: "{}", headers })).status, 403);
+  assert.equal((await api(route, { method: "OPTIONS" })).status, 405);
+  assert.equal((await request(port, route, { method: "POST", body: "{}" })).status, 403);
+  for (const body of [JSON.stringify({ unexpected: true }), "null", "[]", "1", "\"text\"", "", "{bad}"]) {
+    assert.equal((await api(route, { method: "POST", body })).status, 400);
+  }
+  assert.equal((await api(route, { method: "POST", body: " ".repeat(MAX_AUTH_BODY_BYTES + 1) })).status, 413);
+  assert.equal((await api(route, { method: "POST", body: "{}", headers: { Host: "evil.example" } })).status, 403);
+  assert.equal((await api(route)).status, 404);
+  assert.equal(installs, 0);
+  const result = await api(route, { method: "POST", body: "{}" });
+  assert.equal(result.status, 200); assert.equal(result.headers["cache-control"], "no-store");
+  assert.equal(JSON.parse(result.text).changed, true); assert.equal(JSON.parse(result.text).installed, true);
+  assert.ok(!result.text.includes("/private")); assert.equal(installs, 1);
+});
+
+test("Coding Discipline status failures are isolated and installer errors map to fixed responses", async (t) => {
+  for (const code of ["CODING_DISCIPLINE_CONFLICT", "CODING_DISCIPLINE_UNAVAILABLE", "EIO"]) {
+    const { api } = await fixture(t, { projectMemory: { getStatus: async () => ({ state: "absent", ready: true, installed: false }) },
+      codingDiscipline: { getStatus: async () => ({ state: "secret_code", ready: true, installed: true, reason: "private reason" }),
+        install: async () => { throw Object.assign(new Error("private output"), { code }); } } });
+    const status = JSON.parse((await api("/api/auth/status")).text);
+    assert.equal(status.codingDiscipline.state, "unavailable"); assert.equal(status.codingDiscipline.ready, false);
+    assert.equal(status.projectMemory.ready, true);
+    assert.ok(!JSON.stringify(status.codingDiscipline).includes("private"));
+    const result = await api("/api/auth/coding-discipline/install", { method: "POST", body: "{}" });
+    assert.equal(result.status, code === "CODING_DISCIPLINE_CONFLICT" ? 409 : 503);
+    assert.ok(!result.text.includes("private"));
+  }
+  const thrown = await fixture(t, { codingDiscipline: { getStatus: async () => { throw new Error("private fs"); } } });
+  assert.equal(JSON.parse((await thrown.api("/api/auth/status")).text).codingDiscipline.state, "unavailable");
+  const missing = await fixture(t);
+  assert.equal(JSON.parse((await missing.api("/api/auth/status")).text).codingDiscipline.state, "unavailable");
+  assert.equal((await missing.api("/api/auth/coding-discipline/install", { method: "POST", body: "{}" })).status, 503);
+});
+
 test("setup endpoints share loopback/Host/nonce/Origin/JSON/OPTIONS and bounded empty-object guards", async (t) => {
   let writes = 0;
   const { api, port, router, nonce } = await fixture(t, { setup: {
@@ -373,4 +421,65 @@ test("bounded bodies, malformed JSON and corrupt stores produce fixed safe error
   const result = await api("/api/auth/status");
   assert.equal(result.status, 503);
   assert.ok(!result.text.includes("private-store-contents"));
+});
+
+test("Online Summary prompt saves and resets through the guarded route with fixed errors", async (t) => {
+  const patches = [];
+  let current = { enabled: true, model: null, defaultModel: "gpt-6-luna", models: ["gpt-6-luna"], threshold: 16384, thresholds: [16384],
+    prompt: "Built-in prompt.", customPrompt: false, secret: "/private" };
+  const summarySettings = {
+    getStatus: async () => current,
+    configure: async (patch) => {
+      patches.push(patch);
+      if (patch.summaryPrompt === "") throw Object.assign(new Error("raw detail"), { status: 400, code: "INVALID_SUMMARY_PROMPT" });
+      current = { ...current, prompt: patch.summaryPrompt || "Built-in prompt.", customPrompt: Boolean(patch.summaryPrompt) };
+      return current;
+    }
+  };
+  const { api } = await fixture(t, { summarySettings });
+  const route = "/api/auth/online-summary/configure";
+  const status = JSON.parse((await api("/api/auth/status")).text).onlineSummary;
+  assert.equal(status.prompt, "Built-in prompt.");
+  assert.equal(status.customPrompt, false);
+  assert.equal("secret" in status, false);
+  assert.equal((await api(route, { method: "POST", body: JSON.stringify({ prompt: "x" }), headers: { "X-Auth-Nonce": "wrong" } })).status, 403);
+  for (const body of [{ prompt: 1 }, { prompt: ["x"] }, { prompt: "x", unexpected: true }]) {
+    assert.equal((await api(route, { method: "POST", body: JSON.stringify(body) })).status, 400);
+  }
+  const saved = await api(route, { method: "POST", body: JSON.stringify({ prompt: "Custom.\nReply with JSON only." }) });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(JSON.parse(saved.text).onlineSummary.prompt, "Custom.\nReply with JSON only.");
+  assert.equal(JSON.parse(saved.text).onlineSummary.customPrompt, true);
+  const invalid = await api(route, { method: "POST", body: JSON.stringify({ prompt: "" }) });
+  assert.equal(invalid.status, 400);
+  assert.equal(JSON.parse(invalid.text).error, "Enter a non-empty prompt of at most 8 KiB.");
+  const reset = await api(route, { method: "POST", body: JSON.stringify({ prompt: null }) });
+  assert.equal(JSON.parse(reset.text).onlineSummary.customPrompt, false);
+  assert.deepEqual(patches, [{ summaryPrompt: "Custom.\nReply with JSON only." }, { summaryPrompt: "" }, { summaryPrompt: null }]);
+});
+
+test("Online Summary retention is allowlisted in status and saved as archiveRetentionDays", async (t) => {
+  const patches = [];
+  const summarySettings = {
+    getStatus: async () => ({ enabled: false, retentionDays: 30, retentionOptions: [7, 30, 0, -1, "90"] }),
+    configure: async (patch) => {
+      patches.push(patch);
+      if (patch.archiveRetentionDays === 5) throw Object.assign(new Error("raw detail"), { status: 400, code: "INVALID_RETENTION_DAYS" });
+      return { enabled: false, retentionDays: patch.archiveRetentionDays, retentionOptions: [7, 30, 0] };
+    }
+  };
+  const { api } = await fixture(t, { summarySettings });
+  const route = "/api/auth/online-summary/configure";
+  const status = JSON.parse((await api("/api/auth/status")).text).onlineSummary;
+  assert.equal(status.retentionDays, 30);
+  assert.deepEqual(status.retentionOptions, [7, 30, 0]);
+  for (const retentionDays of ["7", 7.5, null]) {
+    assert.equal((await api(route, { method: "POST", body: JSON.stringify({ retentionDays }) })).status, 400);
+  }
+  const saved = await api(route, { method: "POST", body: JSON.stringify({ retentionDays: 0 }) });
+  assert.equal(JSON.parse(saved.text).onlineSummary.retentionDays, 0);
+  const invalid = await api(route, { method: "POST", body: JSON.stringify({ retentionDays: 5 }) });
+  assert.equal(invalid.status, 400);
+  assert.equal(JSON.parse(invalid.text).error, "Choose a retention period from the list.");
+  assert.deepEqual(patches, [{ archiveRetentionDays: 0 }, { archiveRetentionDays: 5 }]);
 });

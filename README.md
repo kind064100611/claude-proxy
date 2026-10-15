@@ -12,6 +12,7 @@ A local gateway for Claude Code. Access GPT through ChatGPT / Codex device autho
 - [Configuring Statusline](#configuring-statusline)
 - [Registering a macOS service](#registering-a-macos-service)
 - [Installing Project Code Memory](#installing-project-code-memory)
+- [Installing Coding Discipline](#installing-coding-discipline)
 - [Model selection and API](#model-selection-and-api)
 - [Streaming, tools, images, and reasoning](#streaming-tools-images-and-reasoning)
 - [Cache behavior](#cache-behavior)
@@ -246,6 +247,18 @@ An identical complete deployed skill or matching pinned upstream core is a **rea
 
 **Open a new Claude session after installation.** Invoke `/project-code-memory` explicitly or allow the model to select it. This is model-driven guidance, not a hook. A later `query` intentionally creates the selected project's `projectCodeMemory/` cache, adds its ignore rule, and may prune stale records. Installing the skill does not perform that query. See the [bundled README](project-code-memory/README.md), [provenance](project-code-memory/SOURCE.md), and [MIT license](project-code-memory/LICENSE). The upstream Python implementation, reference, optional Codex agent metadata, and upstream tests are retained in the repository; only the five files above are installed.
 
+## Installing Coding Discipline
+
+**Install Coding Discipline** on `/login` is an independent macOS/Windows button. It needs an installed **Claude CLI**, but not Python or proxy login. Missing CLI dependencies must be installed manually. Installation uses the existing loopback, Host, nonce, same-origin JSON, and bounded empty-object guards at `POST /api/auth/coding-discipline/install`.
+
+The `coding-discipline/` bundle is adapted from [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills) (formerly `forrestchang/andrej-karpathy-skills`), pinned to commit `2c606141936f1eeef17fa3043a72095b4765b9c2`. Upstream declares MIT in its README and skill frontmatter but has no LICENSE file; the bundle includes MIT license text. See [provenance](coding-discipline/SOURCE.md), [manifest](coding-discipline/manifest.json), and [license](coding-discipline/LICENSE) for adaptations and original/deployed SHA-256 hashes.
+
+The installer verifies the manifest and copies only `SKILL.md`, `LICENSE`, and `SOURCE.md` into `<actual CLI config directory>/skills/coding-discipline/`. The root defaults to `~/.claude` (`%USERPROFILE%\.claude` on Windows) and respects `CLAUDE_CONFIG_DIR`. Installs are serialized: files are written into a private `.coding-discipline-stage-*` directory under `skills/`, then published by a directory rename. New POSIX directories/files use `0700/0600`. Symlinked, foreign-owned, or other-user-writable install parents and symlinked targets are refused.
+
+An identical `SKILL.md`, including a manual SKILL.md-only installation, is a read-only no-op: no files are added or upgraded. Existing targets with different or missing `SKILL.md`, partial installations, and non-directory targets must be handled manually and are never overwritten. Import, status, and page load do not install anything. The button performs no downloads or model calls and does not modify settings, CLAUDE.md, hooks, credentials, or services.
+
+**Open a new Claude session after installation.** The skill asks the model to load it before any code change; you can also invoke `/coding-discipline` explicitly. Skill use remains model-driven guidance, not hook enforcement.
+
 ## Model selection and API
 
 ```bash
@@ -254,7 +267,7 @@ curl http://127.0.0.1:8082/v1/models
 curl http://127.0.0.1:8082/features
 ```
 
-The catalog returns `claude-gateway/<model ID>`. Eligible models may include a `[1m]` extended-context marker, which is removed before forwarding. This marker is not a guarantee of the account's actual context allowance; upstream capabilities depend on the account catalog and request results.
+The catalog returns `claude-gateway/<model ID>`. When `capabilities.limits.max_context_window_tokens` is a valid positive integer, it decides the `[1m]` extended-context marker: only limits of at least 1,000,000 tokens get the suffix, so Copilot's `claude-haiku-4.5` at 200K does not. Without a valid catalog limit, the existing GPT Sol/Luna/Terra and Claude family rules remain in effect. The suffix is never duplicated and is removed before forwarding. This marker is not an upstream expansion or a guarantee of the account's actual context allowance; upstream capabilities depend on the account catalog and request results.
 
 Requests may use the full gateway ID from the catalog or an explicit raw GPT / Claude model ID. CLI aliases such as `sonnet`, `opus`, `haiku`, and `default` use the model configured in settings. Send an explicit model ID if no default is configured. Other model types return HTTP 400 instead of being routed to the wrong provider.
 
@@ -338,20 +351,22 @@ Up to 20 excerpts of up to 40 lines are included, without repeating overlapping 
 
 **Summary model.** By default the proxy picks the newest Luna model (for example `gpt-6-luna`, which needs ChatGPT login or `OPENAI_API_KEY`) and falls back to the newest Haiku model (Copilot). The detection is cached until the proxy restarts. You can choose another GPT or Copilot Claude model on `/login`; a chosen model is tried first and falls back to Luna, then Haiku, if it fails. Each summary has a 30-second timeout. Outputs over 1 MiB are sent to the model as their first and last ~512 KiB with the omitted line range noted. If every model fails, the original output is kept.
 
+**Summary prompt.** The `/login` card displays the current system prompt sent to the summary model. Edit it and click **Save prompt** to persist `summaryPrompt` without restarting the proxy. It must be non-empty and fit within 8 KiB after JSON encoding. Keep the JSON reply contract with `summary` and `highlights`; malformed model replies fail safely to the original output. **Reset to default** removes the override, as does saving text equivalent to the built-in prompt, so later built-in updates still apply. Status refreshes preserve unsaved edits.
+
 **Not summarized:** `Read` output (edits need exact text), error results, images or mixed content, archive readbacks, outputs below the threshold, history that existed before the first observed request, and requests without a session identity or a native `Read` tool.
 
 **Tool outputs are sent to the summary model's provider** (OpenAI or GitHub Copilot), which may differ from your main model's provider. Turn Online Summary off when outputs may contain sensitive data.
 
 ### Turning it on or off and choosing the model
 
-The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off, the model and threshold selects are disabled while it is off, the model select defaults to the detected cheap model, and the threshold defaults to 16 KiB. Changes are saved immediately and apply to the next request without restarting the proxy. Both settings live under the actual HOME:
+The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off; the model, threshold, and prompt controls are disabled while it is off. The model defaults to the detected cheap model and the threshold to 16 KiB. Archive retention defaults to 30 days and remains editable while summaries are off. Select changes are saved immediately; prompt changes use **Save prompt**. Summary changes apply to new tool outputs without restarting; retention changes take effect at the next cleanup. Settings live under the actual HOME:
 
 ```text
 ~/.claude/gateway-features.json
 {"version": 1, "onlineSummary": true, "summaryModel": "claude-haiku-5.5", "summaryThreshold": 8192}
 ```
 
-`onlineSummary` defaults to on when the file or field is absent; damaged or unsafe configuration disables new summaries. Remove `summaryModel` to return to automatic detection. The older `observationPack` field is no longer used, and the old beginning/ending excerpt mode has been removed. From the project root:
+`onlineSummary` defaults to on when the file or field is absent; damaged or unsafe configuration disables new summaries. Remove `summaryModel` to return to automatic detection and `summaryPrompt` to restore the built-in prompt. The older `observationPack` field is no longer used, and the old beginning/ending excerpt mode has been removed. From the project root:
 
 ```bash
 node scripts/toggle-online-summary.js status
@@ -376,9 +391,9 @@ Archives always live at:
 
 The limits are 8 MiB per result, 128 MiB of archives per session, and 4 MiB / 20,000 entries for state. Archives and state use private files. An interrupted write freezes new summaries for that session. Unreadable existing state returns 503 rather than rewriting untrusted history.
 
-**Archives contain the original tool output and may include sensitive code or data.** Do not share the archive directory. Archives are not cleaned up automatically; remove them only after the related sessions have ended. `CLAUDE_CONFIG_DIR` does not relocate the settings or archive paths.
+**Archives contain the original tool output and may include sensitive code or data.** Do not share the archive directory. At proxy startup and hourly afterward, archives unused for more than **30 days** are deleted, even while Online Summary is off. Choose **7 / 14 / 30 / 60 / 90 days** or **Never** on `/login` (`archiveRetentionDays: 0` means never). Non-read-only requests refresh session usage time. Cleanup recognizes only this module's hashed session directories and archive filenames, removes the ledger before originals, never follows symlinks, and preserves a whole session if it contains unexpected files. Foreign-owned directories and archive roots writable by other users are skipped. Damaged/unsafe configuration or an invalid retention value disables deletion. Resuming a cleaned session sends its earlier tool outputs in full again, costing more tokens and invalidating that cached prefix once. `CLAUDE_CONFIG_DIR` does not relocate the settings or archive paths.
 
-Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`, plus `summary_threshold`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models used as `summary_models`), `Tool output summarized` (model, input bytes, duration), and `Summary model failed` (model, status, duration). They never contain tool output, raw session IDs, or credentials.
+Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`, plus `summary_threshold`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models used as `summary_models`), `Tool output summarized` (model, input bytes, duration), `Summary model failed` (model, status, duration), and `Online summary archive cleanup` (removed session count). Configuration events also report default/custom prompt selection and archive retention days, never the prompt text. They never contain tool output, raw session IDs, or credentials.
 
 ## Environment variables
 

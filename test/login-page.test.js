@@ -9,7 +9,7 @@ function pageHarness(_unused, { status, configure, requestImpl, fastWait = false
   const elements = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, {
-      value: "", textContent: "", dataset: {}, hidden: true, disabled: ["cli-configure", "statusline-configure", "macos-service-configure", "project-memory-install"].includes(id), attributes: {}, listeners: {}, classList: { add() {}, remove() {} },
+      value: "", textContent: "", dataset: {}, hidden: true, disabled: ["cli-configure", "statusline-configure", "macos-service-configure", "project-memory-install", "coding-discipline-install"].includes(id), attributes: {}, listeners: {}, classList: { add() {}, remove() {} },
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, handler) { this.listeners[name] = handler; },
       replaceChildren(...children) { this.children = children; }
@@ -97,6 +97,41 @@ test("Project Code Memory errors are parsed and status failure disables installa
   await unavailable.refresh();
   assert.equal(unavailable.element("project-memory-install").disabled, true);
   assert.match(unavailable.element("project-memory-status").textContent, /Unable to load/);
+});
+
+test("Coding Discipline card is independently gated and reports install, already-installed and conflict results", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../web/login.html"), "utf8");
+  assert.match(html, /id="coding-discipline-install" type="button" disabled/);
+  let outcome = response({ ok: true, installed: true, changed: true });
+  const page = pageHarness(async () => [], { status: () => ({ codingDiscipline: { ready: true } }), configure: async () => outcome });
+  assert.equal(page.element("coding-discipline-install").disabled, true);
+  await page.refresh();
+  assert.equal(page.element("coding-discipline-install").disabled, false);
+  assert.equal(page.element("project-memory-install").disabled, true);
+  await page.element("coding-discipline-install").listeners.click();
+  const posts = page.requests.filter((item) => item.url.endsWith("/coding-discipline/install"));
+  assert.equal(posts.length, 1); assert.equal(posts[0].options.body, "{}");
+  assert.match(page.element("coding-discipline-status").textContent, /^Coding Discipline installed.*new Claude session/i);
+  outcome = response({ ok: true, installed: true, changed: false });
+  await page.element("coding-discipline-install").listeners.click();
+  assert.match(page.element("coding-discipline-status").textContent, /already installed.*new Claude session/i);
+  outcome = response({ error: "Fixed install conflict." }, 409);
+  await page.element("coding-discipline-install").listeners.click();
+  assert.equal(page.element("coding-discipline-status").textContent, "Fixed install conflict.");
+  assert.equal(page.element("project-memory-status").textContent, "Project Code Memory is not ready to install.");
+});
+
+test("Coding Discipline status failure disables installation", async () => {
+  let failStatus = false;
+  const page = pageHarness(async () => [], { status: () => {
+    if (failStatus) throw new Error("offline");
+    return { codingDiscipline: { ready: true } };
+  } });
+  await page.refresh();
+  assert.equal(page.element("coding-discipline-install").disabled, false);
+  failStatus = true; await page.refresh();
+  assert.equal(page.element("coding-discipline-install").disabled, true);
+  assert.match(page.element("coding-discipline-status").textContent, /Unable to load Coding Discipline status/);
 });
 
 test("macOS service UI polls verified identity and recovers nonce without executing markup", () => {
@@ -375,5 +410,88 @@ test("Online Summary shows save failures and keeps controls disabled when settin
   await unavailable.refresh();
   assert.equal(unavailable.element("online-summary-enabled").disabled, true);
   assert.equal(unavailable.element("online-summary-model").disabled, true);
+  assert.equal(unavailable.element("online-summary-prompt").disabled, true);
+  assert.equal(unavailable.element("online-summary-prompt-reset").disabled, true);
   assert.match(unavailable.element("online-summary-status").textContent, /unavailable/);
+});
+
+test("Online Summary prompt keeps unsaved edits across refreshes, saves the text and resets to the default", async () => {
+  const builtIn = "Built-in prompt.";
+  let settings = { available: true, enabled: true, model: null, defaultModel: "gpt-6-luna", models: ["gpt-6-luna"],
+    threshold: 16384, thresholds: [16384], prompt: builtIn, customPrompt: false };
+  const posts = [];
+  let reject = false;
+  const page = pageHarness(async () => [], { status: () => ({ onlineSummary: settings }),
+    configure: async (url, options) => {
+      const change = JSON.parse(options.body);
+      posts.push(change);
+      if (reject) return response({ error: "Enter a non-empty prompt of at most 8 KiB." }, 400);
+      if ("enabled" in change) settings = { ...settings, enabled: change.enabled };
+      if ("prompt" in change) settings = { ...settings, prompt: change.prompt ?? builtIn, customPrompt: change.prompt !== null };
+      return response({ success: true, onlineSummary: settings });
+    } });
+  await page.refresh();
+  const prompt = page.element("online-summary-prompt");
+  assert.equal(prompt.value, builtIn);
+  assert.equal(prompt.disabled, false);
+  assert.match(page.element("online-summary-status").textContent, /prompt: default/);
+
+  prompt.value = "Unsaved edit";
+  prompt.listeners.input();
+  await page.refresh();
+  assert.equal(prompt.value, "Unsaved edit");
+
+  reject = true;
+  prompt.value = "";
+  await page.element("online-summary-prompt-save").listeners.click();
+  assert.deepEqual(posts.at(-1), { prompt: "" });
+  assert.match(page.element("online-summary-status").textContent, /non-empty prompt/);
+  assert.equal(prompt.value, "");
+
+  reject = false;
+  prompt.value = "Custom prompt";
+  await page.element("online-summary-prompt-save").listeners.click();
+  assert.deepEqual(posts.at(-1), { prompt: "Custom prompt" });
+  assert.match(page.element("online-summary-status").textContent, /Saved/);
+  settings = { ...settings, prompt: "Saved elsewhere" };
+  await page.refresh();
+  assert.equal(prompt.value, "Saved elsewhere");
+
+  prompt.value = "Broken edit";
+  prompt.listeners.input();
+  await page.element("online-summary-prompt-reset").listeners.click();
+  assert.deepEqual(posts.at(-1), { prompt: null });
+  assert.equal(prompt.value, builtIn);
+  assert.match(page.element("online-summary-status").textContent, /reset to the default/);
+
+  page.element("online-summary-enabled").checked = false;
+  await page.element("online-summary-enabled").listeners.change();
+  for (const id of ["online-summary-prompt", "online-summary-prompt-save", "online-summary-prompt-reset"]) assert.equal(page.element(id).disabled, true);
+});
+
+test("Online Summary retention stays editable while summaries are off and saves only the period", async () => {
+  let settings = { available: true, enabled: false, model: null, defaultModel: "gpt-6-luna", models: ["gpt-6-luna"],
+    threshold: 16384, thresholds: [16384], prompt: "Built-in prompt.", customPrompt: false, retentionDays: 30, retentionOptions: [7, 30, 0] };
+  const posts = [];
+  const page = pageHarness(async () => [], { status: () => ({ onlineSummary: settings }),
+    configure: async (url, options) => {
+      const change = JSON.parse(options.body);
+      posts.push(change);
+      settings = { ...settings, retentionDays: change.retentionDays };
+      return response({ success: true, onlineSummary: settings });
+    } });
+  await page.refresh();
+  const retention = page.element("online-summary-retention");
+  assert.equal(retention.value, "30");
+  assert.equal(retention.disabled, false);
+  assert.equal(page.element("online-summary-threshold").disabled, true);
+  assert.deepEqual(retention.children.map((option) => option.textContent), ["7 days without use", "30 days without use", "Never (keep all archives)"]);
+  retention.value = "0";
+  await retention.listeners.change();
+  assert.deepEqual(posts, [{ retentionDays: 0 }]);
+  assert.equal(retention.value, "0");
+  assert.match(page.element("online-summary-status").textContent, /Saved/);
+  const offline = pageHarness(async () => [], { status: () => { throw new Error("offline"); } });
+  await offline.refresh();
+  assert.equal(offline.element("online-summary-retention").disabled, true);
 });
