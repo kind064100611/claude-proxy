@@ -52,7 +52,7 @@ test("feature toggle defaults on in user HOME, CLI preserves other fields, and r
   const modulePath = path.resolve(__dirname, "../lib/online-summary");
   const scriptPath = path.resolve(__dirname, "../scripts/toggle-online-summary.js");
   const read = () => JSON.parse(execFileSync(process.execPath, ["-e", `const p = require(${JSON.stringify(modulePath)}); console.log(JSON.stringify({file:p.getFeatureConfigPath(),status:p.createOnlineSummary().getStatus()}));`], { cwd: home, env, encoding: "utf8" }));
-  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 16384, summaryPrompt: null, archiveRetentionDays: 30 } });
+  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null } });
   execFileSync(process.execPath, [scriptPath, "status"], { cwd: home, env });
   assert.equal(fs.existsSync(path.dirname(filename)), false);
   fs.mkdirSync(path.dirname(filename), { mode: 0o700 });
@@ -127,6 +127,20 @@ test("new results are summarized with verbatim excerpts and archived exactly; sc
     assert.equal(fs.statSync(filename).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.dirname(filename)).mode & 0o777, 0o700);
   }
+});
+
+test("later requests that reuse a pinned summary still report its model", async (t) => {
+  const { pack, model } = fixture(t);
+  const first = initial();
+  await pack.prepare(first);
+  const summarized = addResult(first, "call_one");
+  await pack.prepare(summarized);
+  const reused = await pack.prepare(addResult(summarized, "call_small", "short output"));
+  assert.equal(model.calls, 1);
+  assert.equal(reused.stats.summarized_results, 0);
+  assert.equal(reused.stats.packed_results, 1);
+  assert.equal(reused.stats.summary_models, "gpt-test-luna");
+  assert.equal((await pack.prepare(addResult(first, "call_tiny", "short output"))).stats.summary_models, undefined);
 });
 
 test("render keeps excerpts verbatim, truncates long lines, skips repeated lines and lists ranges beyond the budget", () => {
@@ -324,11 +338,11 @@ test("summary model selection persists, is validated and can return to automatic
   const settings = createSummarySettings({ configFile: filename, getDefaultModel: async () => "gpt-6-luna", listModels: async () => models });
   const thresholds = [4096, 8192, 16384, 32768];
   const prompts = { prompt: "", customPrompt: false, retentionDays: 30, retentionOptions: [7, 14, 30, 60, 90, 0] };
-  assert.deepEqual(await settings.getStatus(), { enabled: true, model: null, defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds, ...prompts });
+  assert.deepEqual(await settings.getStatus(), { enabled: true, model: null, defaultModel: "gpt-6-luna", models, threshold: 8192, thresholds, ...prompts });
   assert.equal(fs.existsSync(filename), false);
-  assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models, threshold: 16384, thresholds, ...prompts });
+  assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models, threshold: 8192, thresholds, ...prompts });
   await settings.configure({ onlineSummary: false, summaryThreshold: 8192 });
-  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30 });
+  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null });
   await assert.rejects(settings.configure({ summaryThreshold: 1000 }), { code: "INVALID_SUMMARY_THRESHOLD" });
   await assert.rejects(settings.configure({ summaryModel: "not-listed" }), { code: "UNKNOWN_SUMMARY_MODEL" });
   assert.equal(getStatus(filename).summaryModel, "claude-haiku-5.5");
@@ -339,8 +353,27 @@ test("summary model selection persists, is validated and can return to automatic
   assert.throws(() => setFeatures({ onlineSummary: "yes" }, filename));
   assert.throws(() => setFeatures({ summaryModel: "bad model id" }, filename));
   fs.writeFileSync(filename, JSON.stringify({ version: 1, summaryModel: "bad model id", summaryThreshold: 5000 }));
-  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 16384, summaryPrompt: null, archiveRetentionDays: 30 });
+  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null });
   assert.equal(fs.existsSync(path.join(home, "other-cli-root")), false);
+});
+
+test("project memory is unchosen by default, persists only a boolean and is off for malformed or unsafe configuration", (t) => {
+  const { filename } = featureFixture(t);
+  assert.equal(getStatus(filename).projectMemory, null);
+  assert.throws(() => setFeatures({ projectMemory: "true" }, filename));
+  assert.equal(fs.existsSync(filename), false);
+  setFeatures({ projectMemory: true }, filename);
+  assert.deepEqual(JSON.parse(fs.readFileSync(filename, "utf8")), { version: 1, projectMemory: true });
+  assert.equal(getStatus(filename).projectMemory, true);
+  assert.equal(getStatus(filename).onlineSummary, true);
+  setFeatures({ projectMemory: false }, filename);
+  assert.equal(getStatus(filename).projectMemory, false);
+  fs.writeFileSync(filename, '{"version":1,"onlineSummary":false}');
+  assert.equal(getStatus(filename).projectMemory, null);
+  for (const bytes of ['{"version":1,"projectMemory":"true"}', '{"version":1,"projectMemory":1}', '{"version":1,"projectMemory":null}', '{"version":2,"projectMemory":true}', "{broken"]) {
+    fs.writeFileSync(filename, bytes);
+    assert.equal(getStatus(filename).projectMemory, false);
+  }
 });
 
 test("a custom summary prompt persists, is validated, and resetting or saving the default removes it", async (t) => {
@@ -383,9 +416,9 @@ test("configuration events report the enabled state, summary model and prompt ch
   pack.getStatus();
   setFeatures({ summaryPrompt: "private custom prompt" }, configFile);
   pack.getStatus();
-  assert.deepEqual(events, [{ event: "configuration", enabled: true, summary_model: "auto", summary_threshold: 16384, summary_prompt: "default", archive_retention_days: 30 },
-    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 16384, summary_prompt: "default", archive_retention_days: 30 },
-    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 16384, summary_prompt: "custom", archive_retention_days: 30 }]);
+  assert.deepEqual(events, [{ event: "configuration", enabled: true, summary_model: "auto", summary_threshold: 8192, summary_prompt: "default", archive_retention_days: 30 },
+    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 8192, summary_prompt: "default", archive_retention_days: 30 },
+    { event: "configuration", enabled: true, summary_model: "claude-haiku-5.5", summary_threshold: 8192, summary_prompt: "custom", archive_retention_days: 30 }]);
 });
 
 test("the configured threshold decides which outputs are summarized and weak compression keeps the original", async (t) => {

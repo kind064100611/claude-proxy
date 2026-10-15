@@ -1,6 +1,6 @@
 # claude-proxy
 
-A local gateway for Claude Code. Access GPT through ChatGPT / Codex device authorization or an OpenAI API key, and access Claude through GitHub Copilot device authorization. Includes dynamic model discovery, a local login page, protected Claude CLI routing and Statusline setup, optional current-user macOS service registration, guarded Project Code Memory skill installation, tool and image conversion, streaming responses, Online Summary of large tool outputs, and comprehensive cache compatibility.
+A local gateway for Claude Code. Access GPT through ChatGPT / Codex device authorization or an OpenAI API key, and access Claude through GitHub Copilot device authorization. Includes dynamic model discovery, a local login page, protected Claude CLI routing and Statusline setup, optional current-user macOS service registration, gateway-maintained Project Code Memory, tool and image conversion, streaming responses, Online Summary of large tool outputs, and comprehensive cache compatibility.
 
 ## Contents
 
@@ -11,7 +11,7 @@ A local gateway for Claude Code. Access GPT through ChatGPT / Codex device autho
 - [Configuring Claude CLI](#configuring-claude-cli)
 - [Configuring Statusline](#configuring-statusline)
 - [Registering a macOS service](#registering-a-macos-service)
-- [Installing Project Code Memory](#installing-project-code-memory)
+- [Gateway-maintained Project Code Memory](#gateway-maintained-project-code-memory)
 - [Installing Coding Discipline](#installing-coding-discipline)
 - [Model selection and API](#model-selection-and-api)
 - [Streaming, tools, images, and reasoning](#streaming-tools-images-and-reasoning)
@@ -41,7 +41,7 @@ Claude Code / Anthropic Messages client
 - GPT requests are converted to the Responses API, and responses are converted back to Anthropic Messages / SSE.
 - Claude requests use Copilot's native Messages endpoint, preserving thinking, signatures, tool events, and cache usage.
 - `/v1/models` merges the two dynamic catalogs available to the current credentials. There is no bundled static account model list.
-- `/login` manages local device authorization, CLI routing, Statusline setup, Online Summary settings, optional macOS service registration, and Project Code Memory installation. It does not collect account passwords.
+- `/login` manages local device authorization, CLI routing, Statusline setup, Online Summary settings, optional macOS service registration, and the gateway-maintained Project Code Memory switch. It does not collect account passwords.
 - The proxy uses CommonJS and Node.js built-in modules; there is no build step or npm runtime dependency.
 
 Source layout: `lib/` contains provider, login, secure storage, setup, and cache modules; `web/login.html` is the local page; `mac/` and `windows/` contain platform proxies and launchers; `scripts/` contains feature-toggle utilities; and `test/` contains offline tests. The two `proxy.js` files are identical.
@@ -226,26 +226,33 @@ New plists transfer only validated cache switches (`OPENAI_PROMPT_CACHE`, `CLAUD
 
 The service depends on absolute Node and repository paths. Moving either requires manual repair; do not overwrite another installation's plist or blindly delete service state. Service logs may contain operational or model-request information: keep them private and inspect them before sharing.
 
-## Installing Project Code Memory
+## Gateway-maintained Project Code Memory
 
-**Install Project Code Memory** on `/login` installs the bundled code-memory skill independently of proxy login, CLI routing, Statusline, and macOS service registration. It requires an installed **Claude CLI** and **CPython 3.9+** with its standard library. Windows Python and the `py -3` launcher are supported by fixed, shell-free `-I -B` probes; automatic interpreter installation is explicitly disabled. Missing dependencies must be installed manually.
+The **Gateway-maintained Project Code Memory** switch on `/login` is independent of proxy login, CLI routing, Statusline, and macOS service registration. The main model only **queries** records; the gateway refreshes, adds, and deletes them in the background with a cheaper model. It requires **Claude CLI** and **CPython 3.9+** with its standard library. Windows Python and `py -3` are supported using fixed, shell-free `-I -B` probes and a sanitized environment; automatic interpreter installation is disabled. Missing dependencies must be installed manually.
 
-Installation is an explicit, local nonce-protected `{}` `POST /api/auth/project-memory/install`. The bundle is pinned to upstream commit `7dc7b0dad137fa8e1e65af31143f4ead8109ca03` and validated against its manifest. Only these files are deployed:
+**First startup and explicit choice.** When `projectMemory` has never been set, startup attempts to install the query-only skill and enable maintenance. Missing dependencies or a conflicting skill leave it off without writing files. An explicit `false` stays off on future startups; malformed or unsafe feature configuration also prevents automatic enablement. Status and page loads do not install anything. Manual changes use the local, nonce-protected `POST /api/auth/project-memory/configure` with exactly `{"enabled":true}` or `{"enabled":false}`. The choice lives in `~/.claude/gateway-features.json`, independently of `CLAUDE_CONFIG_DIR`.
+
+**Enable and install.** After checking dependencies, the installer validates the manifest pinned to upstream commit `7dc7b0dad137fa8e1e65af31143f4ead8109ca03` and deploys only:
 
 ```text
 <actual CLI config directory>/skills/project-code-memory/
   SKILL.md
   scripts/pcm.py
-  references/record-format.md
   LICENSE
   SOURCE.md
 ```
 
-The actual CLI root defaults to `~/.claude` and follows `CLAUDE_CONFIG_DIR`. Installs are serialized in the proxy process. All files are first written to a private `.project-code-memory-stage-*` directory under `<actual CLI config directory>/claude-proxy/`, then published with a single directory rename, so Claude never sees a half-installed skill. On failure only that staging directory is removed; if the target appears meanwhile, it is kept and reported as a conflict. Copying `project-code-memory/` into the skills directory manually also works and is detected as installed.
+The actual CLI root defaults to `~/.claude` (`%USERPROFILE%\.claude` on Windows) and follows `CLAUDE_CONFIG_DIR`. Operations are serialized in the proxy process. Installation writes all files to a private `.project-code-memory-stage-*` directory under `<actual CLI config directory>/claude-proxy/`, then publishes by directory rename. It sets `projectMemory: true` only after installation succeeds. An identical, exact four-file deployment is a read-only installation no-op. The upstream Python implementation is unchanged; `references/record-format.md` remains in the bundle as maintenance-prompt reference, not an installed file.
 
-An identical complete deployed skill or matching pinned upstream core is a **read-only no-op**, preserving existing `.git`, caches, extras, and directory permissions. Different or partial installations are refused rather than replaced. The installer does not execute `pcm.py`, create project caches, edit `.gitignore`, settings, hooks, or CLAUDE.md, or download code. Import, startup, status, and page load never install anything. Damaged CLI settings and absent proxy credentials do not block this independent feature.
+**Disable and conflict protection.** Disabling writes `false` first, immediately stopping new injection, then removes only the exact deployed file set: every hash must match, with no extra files, directories, or symlinks. Removal first renames and rechecks the directory; changes detected then are restored rather than deleted. Upstream clones, older full-workflow skills, modified or partial installations, and directories with extras are conflicts: enabling never overwrites them, and disabling leaves them in place with a fixed warning. Handle those manually. Project `projectCodeMemory/` caches are always kept. The installer does not edit CLI settings, hooks, CLAUDE.md, or `.gitignore`, download code, or invoke the Python memory CLI.
 
-**Open a new Claude session after installation.** Invoke `/project-code-memory` explicitly or allow the model to select it. This is model-driven guidance, not a hook. A later `query` intentionally creates the selected project's `projectCodeMemory/` cache, adds its ignore rule, and may prune stale records. Installing the skill does not perform that query. See the [bundled README](project-code-memory/README.md), [provenance](project-code-memory/SOURCE.md), and [MIT license](project-code-memory/LICENSE). The upstream Python implementation, reference, optional Codex agent metadata, and upstream tests are retained in the repository; only the five files above are installed.
+**Request behavior.** While enabled, requests with `Edit`/`Write` tools receive a fixed `ProjectMemoryUpdate` tool definition and system instruction appended to the existing content. This keeps the injected bytes stable for prompt caching; toggling can cause one cache rewrite. After changing code, the main model writes its final answer and calls this tool once at the end of the same response, passing the repository root, changed source/test paths, at most three verified knowledge items, and obsolete record IDs. Claude Code may display a red **“No such tool available”** hint because the tool is gateway-injected. The gateway rewrites its result to `Queued.`. When that bare result is all that remains, it repeats the final answer locally as JSON or SSE without another upstream request; mixed tool results or additional user text continue through the existing ChatGPT Responses or Copilot routes. Read-only `/v1/messages` subpaths never enqueue maintenance or end a turn locally.
+
+**Background maintenance and privacy.** Only repositories with an existing, owned, real `projectCodeMemory/` directory are eligible. The gateway does not initialize caches or edit `.gitignore`. It sends up to 12 affected records and numbered evidence files (at most 96 KiB each, enough for a roughly 73 KiB proxy entrypoint, and 256 KiB total, excluding symlink-redirected files) to **Luna, then Haiku** through the existing authentication paths, with a 120-second timeout per model attempt. **Code and record content are sent to that background model/provider while enabled.** New/updated records may cite only supplied files, and each symbol must occur verbatim in a cited file; provenance explicitly says they are not test-verified. Fingerprints are rechecked before saving, and Python applies changes under the existing memory lock. Work is serialized per repository, with at most two jobs running and 16 outstanding globally; it does not block the main request.
+
+Success logs use `[project-memory] Project memory updated project=… model=… saved=N deleted=N rejected=N ms=…`; failures use fixed codes such as `root_rejected`, `model_failed`, `invalid_output`, `python_failed`, or `queue_full`, without logging file contents. Model failures or invalid output leave records untouched. These are machine-generated leads, not authority: fingerprints detect changed files, not claims that were wrong from the start. Queued work is not durable across proxy restarts, and Python remains a runtime dependency while maintenance is enabled.
+
+**Open a new Claude session after toggling.** Use `/project-code-memory` explicitly or let the model select the skill; this is model-driven guidance, not a hook. A query intentionally creates the selected project's ignored `projectCodeMemory/` cache, adds its ignore rule, and may prune stale records. That cache differs from this repository's bundled `project-code-memory/` directory. The [bundled README](project-code-memory/README.md) retains upstream background/workflow material; the installed [query-only skill](project-code-memory/SKILL.md) defines this mode. See [provenance](project-code-memory/SOURCE.md), [manifest](project-code-memory/manifest.json), and [MIT license](project-code-memory/LICENSE).
 
 ## Installing Coding Discipline
 
@@ -303,7 +310,7 @@ Main endpoints:
 | `POST /api/auth/claude/configure` | Protected CLI configuration with an empty JSON object |
 | `POST /api/auth/statusline/configure` | Protected independent Statusline deployment with an empty JSON object |
 | `POST /api/auth/macos/service/configure` | Protected macOS registration; 200 for a running no-op, 202 for a prepared asynchronous operation |
-| `POST /api/auth/project-memory/install` | Protected independent skill installation with an empty JSON object |
+| `POST /api/auth/project-memory/configure` | Protected independent maintenance switch; accepts only `{"enabled":true}` or `{"enabled":false}` |
 | `POST /api/auth/online-summary/configure` | Protected Online Summary settings; accepts only `enabled` (boolean), `model` (an ID from the list), and/or `threshold` (4096, 8192, 16384, or 32768) |
 
 Use `/login` for login and configuration operations; these endpoints do not support ordinary cross-origin API calls. The Messages endpoint is not a complete implementation of the Anthropic API. Do not assume other Anthropic endpoints are available.
@@ -343,9 +350,9 @@ Copilot's native usage fields, including `cache_read_input_tokens` and `cache_cr
 
 ## Online Summary
 
-Online Summary keeps large tool outputs from filling your main model's context. When a new tool output (other than `Read`) reaches the threshold (16 KiB by default), the proxy archives the original locally and asks a cheap model to extract what matters: the outcome (exit status, pass/fail totals), every distinct error or warning with its message and `file:line`, and the line numbers of the key lines. Your main model receives the summary plus those key lines **quoted verbatim by the proxy** with their original line numbers, and the archive path. The cheap model only selects lines; it never rewrites the quoted text. Line numbers match `Read`, so the main model can read more with `Read(file_path, offset, limit)` when needed.
+Online Summary keeps large tool outputs from filling your main model's context. When a new tool output (other than `Read`) reaches the threshold (8 KiB by default), the proxy archives the original locally and asks a cheap model to extract what matters: the outcome (exit status, pass/fail totals), every distinct error or warning with its message and `file:line`, and the line numbers of the key lines. Your main model receives the summary plus those key lines **quoted verbatim by the proxy** with their original line numbers, and the archive path. The cheap model only selects lines; it never rewrites the quoted text. Line numbers match `Read`, so the main model can read more with `Read(file_path, offset, limit)` when needed.
 
-**Threshold.** Choose 4, 8, 16, or 32 KiB on `/login` (saved as `summaryThreshold`). Lower thresholds summarize more outputs and save more tokens, but each summary adds a few seconds. Summary length scales with the output size, and if a summary would not shrink the output below 70% of its original size, the original is kept.
+**Threshold.** The default is 8 KiB. Choose 4, 8, 16, or 32 KiB on `/login` (saved as `summaryThreshold`). Lower thresholds summarize more outputs and save more tokens, but each summary adds a few seconds. Summary length scales with the output size, and if a summary would not shrink the output below 70% of its original size, the original is kept.
 
 Up to 20 excerpts of up to 40 lines are included, without repeating overlapping lines, within half of the original size (4,000 to 12,000 characters). Excerpts that do not fit are listed by line range and reason so the main model can jump straight to them.
 
@@ -359,7 +366,7 @@ Up to 20 excerpts of up to 40 lines are included, without repeating overlapping 
 
 ### Turning it on or off and choosing the model
 
-The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off; the model, threshold, and prompt controls are disabled while it is off. The model defaults to the detected cheap model and the threshold to 16 KiB. Archive retention defaults to 30 days and remains editable while summaries are off. Select changes are saved immediately; prompt changes use **Save prompt**. Summary changes apply to new tool outputs without restarting; retention changes take effect at the next cleanup. Settings live under the actual HOME:
+The easiest way is the **Online Summary** card on `/login`: the checkbox turns the feature on or off; the model, threshold, and prompt controls are disabled while it is off. The model defaults to the detected cheap model and the threshold to 8 KiB. Archive retention defaults to 30 days and remains editable while summaries are off. Select changes are saved immediately; prompt changes use **Save prompt**. Summary changes apply to new tool outputs without restarting; retention changes take effect at the next cleanup. Settings live under the actual HOME:
 
 ```text
 ~/.claude/gateway-features.json
@@ -393,7 +400,7 @@ The limits are 8 MiB per result, 128 MiB of archives per session, and 4 MiB / 20
 
 **Archives contain the original tool output and may include sensitive code or data.** Do not share the archive directory. At proxy startup and hourly afterward, archives unused for more than **30 days** are deleted, even while Online Summary is off. Choose **7 / 14 / 30 / 60 / 90 days** or **Never** on `/login` (`archiveRetentionDays: 0` means never). Non-read-only requests refresh session usage time. Cleanup recognizes only this module's hashed session directories and archive filenames, removes the ledger before originals, never follows symlinks, and preserves a whole session if it contains unexpected files. Foreign-owned directories and archive roots writable by other users are skipped. Damaged/unsafe configuration or an invalid retention value disables deletion. Resuming a cleaned session sends its earlier tool outputs in full again, costing more tokens and invalidating that cached prefix once. `CLAUDE_CONFIG_DIR` does not relocate the settings or archive paths.
 
-Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`, plus `summary_threshold`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models used as `summary_models`), `Tool output summarized` (model, input bytes, duration), `Summary model failed` (model, status, duration), and `Online summary archive cleanup` (removed session count). Configuration events also report default/custom prompt selection and archive retention days, never the prompt text. They never contain tool output, raw session IDs, or credentials.
+Logs include `Online summary configuration` (toggle or chosen model changed; `summary_model` is the model ID or `auto`, plus `summary_threshold`), `Gateway online summary` (replaced results, avoided bytes, new summaries, archive readbacks, and the models that generated all summaries carried in this request, including reused pinned summaries, as `summary_models`), `Tool output summarized` (model, input bytes, duration), `Summary model failed` (model, status, duration), and `Online summary archive cleanup` (removed session count). Configuration events also report default/custom prompt selection and archive retention days, never the prompt text. They never contain tool output, raw session IDs, or credentials.
 
 ## Environment variables
 
@@ -442,7 +449,7 @@ A custom `OPENAI_BASE_URL` receives the API key, model requests, and conversatio
 | `/v1/models` is temporarily empty | Initial discovery may exceed the response budget; retry later. Missing credentials, upstream outages, or unavailable permissions do not produce a fabricated default model |
 | CLI configuration button is unavailable | Ensure Claude CLI is discoverable, matching credentials exist, settings are valid and writable, and authentication conflicts have been resolved manually |
 | Statusline button is unavailable / deployment fails | Check CLI, Bash 3+, jq 1.6+, the bundled script, settings permissions, and private deployment integrity; login is not required. A proxy started before an upgrade must be restarted |
-| Project Code Memory button is unavailable / conflict | Check Claude CLI, CPython 3.9+, bundle integrity, and the skills directory; different or incomplete installations need manual handling |
+| Project Code Memory switch is unavailable / conflict | Check Claude CLI, CPython 3.9+, bundle integrity, and the skills directory; full-workflow, modified, or incomplete skills need manual handling. Explicit off stays off after restart |
 | Service registration is unavailable | Confirm macOS GUI login, safe writable paths, matching label/installation, and supported environment/TLS options; no system service is created |
 | Service request disconnects / result is unknown | Let the page reconnect and verify its operation; do not repeat a lost POST blindly. Inspect private logs and status |
 | Service reports recovery_failed / fails after paths move | Start `bash mac/start-proxy.sh` manually, inspect the matching LaunchAgent and private logs, and repair paths without overwriting another installation |
@@ -479,7 +486,7 @@ HOME="$TEST_HOME" CLAUDE_CONFIG_DIR="$TEST_HOME/config" \
 
 In Windows PowerShell, create a separate temporary directory and set `HOME`, `USERPROFILE`, and `CLAUDE_CONFIG_DIR` for that test run, restoring the original environment afterward. `node --check` also works on Windows; `bash -n` / `cmp` require Git Bash or equivalent tools.
 
-The default suite uses mocked upstreams and temporary directories. It covers device authorization, token-refresh races, catalog invalidation, JSON / SSE, tools / images, cache usage, Responses replay, genuine client disconnects, login-route security, and private settings backups. HTTP end-to-end tests exercise both GPT and Copilot paths and reject unknown models. Statusline tests deploy/run only in temporary roots with synthetic input. Service tests mock system-management commands and run fake proxies on random non-8082 ports; VM/e2e tests inject a fake service. Project Code Memory tests use temporary CLI roots and fake dependency probes, covering no-op preservation, conflicts, concurrent installs, and failed-write cleanup. Online Summary tests use temporary settings/archive roots and fake summary models. No real Statusline configuration, global skill installation, or launchd registration/restart is performed.
+The default suite uses mocked upstreams and temporary directories. It covers device authorization, token-refresh races, catalog invalidation, JSON / SSE, tools / images, cache usage, Responses replay, genuine client disconnects, login-route security, and private settings backups. HTTP end-to-end tests exercise both GPT and Copilot paths and reject unknown models. Statusline tests deploy/run only in temporary roots with synthetic input. Service tests mock system-management commands and run fake proxies on random non-8082 ports; VM/e2e tests inject a fake service. Project Code Memory tests use temporary CLI roots, fake dependency/model calls, and isolated Python `pcm.py` runs in temporary repositories, covering exact-file conflict protection, first-start enablement, explicit off, serialized installation/removal, empty-target races, local JSON/SSE replies, record validation, and failed-write cleanup. Online Summary tests use temporary settings/archive roots and fake summary models. No real Statusline configuration, global skill installation, or launchd registration/restart is performed.
 
 `claude-cli.test.js` is skipped by default. Set `RUN_CLAUDE_CLI_TESTS=1` only when explicitly choosing to run isolated checks with the locally installed CLI. It still uses mocked gateways and does not validate real account authorization or real upstream access.
 

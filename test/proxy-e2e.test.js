@@ -67,8 +67,14 @@ for (const platform of ["mac", "windows"]) {
         if (name === "../lib/project-memory-install") return { createProjectMemoryInstaller: (options) => {
           assert.equal(options.configRoot, configRoot);
           memoryCalls.push("factory");
-          return { getStatus: async () => ({ installed: false, ready: true, state: "absent" }),
-            install: async () => { memoryCalls.push("install"); return { ok: true, changed: true, installed: true, ready: true, state: "installed" }; } };
+          return { getStatus: async () => ({ enabled: false, installed: false, ready: true, state: "absent" }),
+            configure: async (enabled) => { memoryCalls.push(enabled); observations.setFeatures({ projectMemory: enabled }, path.join(root, "features.json"));
+              return { ok: true, changed: true, enabled, installed: enabled, ready: true, state: enabled ? "installed" : "absent" }; },
+            autoEnable: async () => { memoryCalls.push("autoEnable"); return null; } };
+        } };
+        if (name === "../lib/project-memory-maintainer") return { createProjectMemoryMaintainer: (options) => {
+          assert.equal(typeof options.complete, "function");
+          return { enqueue: () => { throw new Error("Unexpected maintenance job in provider routing test"); } };
         } };
         if (name === "../lib/credential-store") return { defaultStore: store };
         if (name === "../lib/model-discovery") return { createModelDiscovery: () => Object.assign(async () => ({ object: "list", data: [
@@ -113,11 +119,11 @@ for (const platform of ["mac", "windows"]) {
     assert.deepEqual(fs.readFileSync(settingsFile), original);
     assert.deepEqual(memoryCalls, ["factory"]);
     assert.equal(fs.existsSync(path.join(configRoot, "skills")), false);
-    const memory = await fetch(base + "/api/auth/project-memory/install", { method: "POST", headers, body: "{}" });
+    const memory = await fetch(base + "/api/auth/project-memory/configure", { method: "POST", headers, body: JSON.stringify({ enabled: true }) });
     assert.equal(memory.status, 200);
     assert.equal((await memory.json()).installed, true);
     assert.equal(memory.headers.get("access-control-allow-origin"), null);
-    assert.deepEqual(memoryCalls, ["factory", "install"]);
+    assert.deepEqual(memoryCalls, ["factory", true]);
     const models = await (await fetch(base + "/v1/models?limit=1000")).json();
     assert.deepEqual(models.data.map((model) => model.id), ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test[1m]"]);
     const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } };
@@ -125,7 +131,7 @@ for (const platform of ["mac", "windows"]) {
       for (const stream of [false, true]) {
         const result = await fetch(base + "/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model, stream, max_tokens: 50, system: "instructions", messages: [{ role: "user", content: [{ type: "text", text: "look" }, image] }],
-            tools: [{ name: "read", input_schema: { type: "object" } }] }) });
+            tools: [{ name: "Edit", input_schema: { type: "object" } }] }) });
         assert.equal(result.status, 200);
         const text = await result.text();
         assert.match(text, /cache_read_input_tokens["\s:]+64/);
@@ -137,6 +143,13 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(upstream[0].payload.input[1].content[1].type, "input_image");
     assert.equal(upstream[0].payload.tools[0].type, "function");
     assert.equal(upstream[2].payload.messages[0].content[1].type, "image");
+    for (const request of upstream) assert.equal(request.payload.tools.at(-1).name, "ProjectMemoryUpdate");
+    assert.match(upstream[0].payload.input[0].content[0].text, /ProjectMemoryUpdate/);
+    assert.match(upstream[2].payload.system.at(-1).text, /ProjectMemoryUpdate/);
+    const disabledMemory = await fetch(base + "/api/auth/project-memory/configure", { method: "POST", headers, body: JSON.stringify({ enabled: false }) });
+    assert.equal(disabledMemory.status, 200);
+    assert.equal((await disabledMemory.json()).enabled, false);
+    assert.deepEqual(memoryCalls, ["factory", true, false]);
     const count = upstream.length;
     for (const model of ["unknown-model", "claude-gateway/unsupported", "gpt-oss-20b"]) {
       const result = await fetch(base + "/v1/messages", { method: "POST", body: JSON.stringify({ model, messages: [] }) });

@@ -14,6 +14,8 @@ const { createClaudeSetup, getClaudeConfigRoot } = require("../lib/claude-setup"
 const { createMacosService } = require("../lib/macos-service");
 const { createProjectMemoryInstaller } = require("../lib/project-memory-install");
 const { createCodingDisciplineInstaller } = require("../lib/coding-discipline-install");
+const { createProjectMemoryGateway } = require("../lib/project-memory-gateway");
+const { createProjectMemoryMaintainer } = require("../lib/project-memory-maintainer");
 
 const PORT = 8082;
 const getAvailableModels = createModelDiscovery({
@@ -32,6 +34,12 @@ const onlineSummary = createOnlineSummary({
   onWarning: (details) => logWarn("online-summary", "Online summary archive warning", details),
   onEvent: (details) => logEvent("online-summary", "Online summary configuration", details)
 });
+const projectMemoryGateway = createProjectMemoryGateway();
+const projectMemoryMaintainer = createProjectMemoryMaintainer({
+  complete: summaryModel.complete,
+  onEvent: (details) => logEvent("project-memory", "Project memory updated", details),
+  onWarning: (details) => logWarn("project-memory", "Project memory update failed", details)
+});
 const IMAGE_UNCONVERTIBLE_TEXT = "[image omitted: invalid or unsupported image source]";
 
 let requestCounter = 0;
@@ -40,6 +48,7 @@ let requestCounter = 0;
 const SERVER_TIMEOUT = 3600000; // 1 hour
 const SSE_KEEPALIVE_MS = 10000;
 const MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024; // reject request bodies larger than 32 MB
+const ESTIMATED_BYTES_PER_TOKEN = 4;
 
 function nextRequestId() {
   requestCounter += 1;
@@ -494,6 +503,27 @@ async function writeSseEvent(res, eventName, data) {
   return writeWithBackpressure(res, `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+// 项目记忆调用的后续请求由代理直接结束这一轮；用量按请求体字节估算，避免客户端的上下文统计归零。
+async function sendLocalMessage(res, body, text, requestBytes, requestId) {
+  const usage = {
+    input_tokens: Math.ceil(requestBytes / ESTIMATED_BYTES_PER_TOKEN),
+    output_tokens: Math.ceil(Buffer.byteLength(text) / ESTIMATED_BYTES_PER_TOKEN)
+  };
+  if (!body.stream) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ id: "msg_" + Date.now(), type: "message", role: "assistant", model: body.model,
+      content: [{ type: "text", text }], stop_reason: "end_turn", stop_sequence: null, usage }));
+    return;
+  }
+  if (!(await openAnthropicStream(res, body.model, requestId))) return;
+  await writeSseEvent(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+  await writeSseEvent(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+  await writeSseEvent(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+  await writeSseEvent(res, "message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage });
+  await writeSseEvent(res, "message_stop", { type: "message_stop" });
+  await endWithBackpressure(res);
+}
+
 function startSseKeepAlive(res, requestId) {
   let writing = false;
   const timer = setInterval(() => {
@@ -869,10 +899,11 @@ function streamToClient(openaiBody, model, primaryModel, requestId, clientRes) {
 }
 
 const macosService = createMacosService({ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy });
+const projectMemoryInstaller = createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() });
 const authRouter = createAuthRouter({
   port: PORT,
   macosService,
-  projectMemory: createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() }),
+  projectMemory: projectMemoryInstaller,
   codingDiscipline: createCodingDisciplineInstaller({ configRoot: getClaudeConfigRoot() }),
   store: credentialStore,
   setup: createClaudeSetup({ store: credentialStore, getAvailableModels }),
@@ -938,12 +969,20 @@ const server = http.createServer(async (req, res) => {
     req.on("end", async () => {
       if (bodyTooLarge) return;
       try {
-        const prepared = await onlineSummary.prepare(JSON.parse(body), {
-          readOnly: new URL(req.url, "http://localhost").pathname !== "/v1/messages"
-        });
-        const anthropicBody = prepared.body;
+        const readOnly = new URL(req.url, "http://localhost").pathname !== "/v1/messages";
+        const prepared = await onlineSummary.prepare(JSON.parse(body), { readOnly });
         if (prepared.stats.packed_results || prepared.stats.recalled_results) {
           logEvent(requestId, "Gateway online summary", prepared.stats);
+        }
+        // 摘要账本按客户端原始消息记录，项目记忆的注入与改写在其后进行。
+        const memory = projectMemoryGateway.prepare(prepared.body, { enabled: onlineSummary.getStatus().projectMemory === true, readOnly });
+        if (memory.triggers.length) logEvent(requestId, "Project memory update queued", { calls: memory.triggers.length });
+        for (const input of memory.triggers) projectMemoryMaintainer.enqueue(input);
+        const anthropicBody = memory.body;
+        if (memory.reply) {
+          logEvent(requestId, "Project memory call answered locally", { stream: Boolean(anthropicBody.stream) });
+          await sendLocalMessage(res, anthropicBody, memory.reply, bodyBytes, requestId);
+          return;
         }
         const isStream = anthropicBody.stream || false;
         const requestedModel = anthropicBody.model;
@@ -1040,6 +1079,10 @@ const cleanupObservationArchives = () => {
 };
 cleanupObservationArchives();
 setInterval(cleanupObservationArchives, 60 * 60 * 1000).unref();
+// 从未选择时尝试安装并启用；显式关闭或配置不安全时不自动安装。
+projectMemoryInstaller.autoEnable().then((result) => {
+  if (result) logEvent("project-memory", "Project Code Memory enabled automatically", { installed: result.changed });
+}).catch(() => logEvent("project-memory", "Project Code Memory stays off", { reason: "not installable" }));
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`claude-proxy running on http://127.0.0.1:${PORT}`);

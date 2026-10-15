@@ -113,11 +113,10 @@
     </section>
 
     <section class="card" aria-labelledby="project-memory-heading">
-      <h2 id="project-memory-heading">Install Project Code Memory</h2>
-      <p>Install the bundled skill into your Claude CLI skills directory. Requires Claude CLI and Python 3.9+; install missing dependencies manually. Existing different versions are never overwritten.</p>
-      <p>Skill use is model-driven, not a hook. Using query creates a cache in the target project and updates its .gitignore. Open a new Claude session after installation.</p>
-      <p id="project-memory-status" class="status" role="status" aria-live="polite">Loading installation status…</p>
-      <button id="project-memory-install" type="button" disabled>Install Project Code Memory</button>
+      <h2 id="project-memory-heading">Gateway-maintained Project Code Memory</h2>
+      <p>When on, the gateway installs a query-only skill and adds a ProjectMemoryUpdate tool to Claude requests that can edit files. After a code change Claude calls it once and the gateway refreshes, adds and deletes records in the background with a cheaper model (Luna, then Haiku). Requires Claude CLI and Python 3.9+; when both are available and you have never changed this setting, the proxy turns it on at startup, otherwise it stays off and cannot be selected. Turning it off removes the skill only if unchanged and stays off; project caches are kept. Claude Code shows one “No such tool available” line per update; this is expected. Open a new Claude session after changing it.</p>
+      <label class="toggle" for="project-memory-enabled"><input id="project-memory-enabled" type="checkbox" disabled> Enable gateway-maintained Project Code Memory</label>
+      <p id="project-memory-status" class="status" role="status" aria-live="polite">Loading Project Code Memory status…</p>
     </section>
 
     <section class="card" aria-labelledby="coding-discipline-heading">
@@ -193,7 +192,7 @@
         });
         if (response.status === 202 && path === "/api/auth/macos/service/configure") return { ...(await response.json()), _httpStatus: 202 };
         if (!response.ok) {
-          if (path.endsWith("/configure") || path.endsWith("/project-memory/install") || path.endsWith("/coding-discipline/install")) {
+          if (path.endsWith("/configure") || path.endsWith("/coding-discipline/install")) {
             const failure = await response.json();
             const fields = Array.isArray(failure.fields) ? ` ${failure.fields.join(", ")}` : "";
             throw Object.assign(new Error(`${failure.error || "Unable to configure. Please try again."}${fields}`), { httpStatus: response.status });
@@ -228,25 +227,30 @@
 
     let projectMemoryBusy = false;
     let projectMemoryMessage = null;
+    let lastProjectMemory = null;
     function renderProjectMemory(status) {
-      const button = document.getElementById("project-memory-install");
+      lastProjectMemory = status;
+      const toggle = document.getElementById("project-memory-enabled");
       const element = document.getElementById("project-memory-status");
-      button.disabled = projectMemoryBusy || status.ready !== true || status.installed === true;
+      toggle.checked = status.enabled === true;
+      toggle.disabled = projectMemoryBusy || (!status.enabled && status.ready !== true);
       if (projectMemoryMessage) setMessage(element, projectMemoryMessage.text, projectMemoryMessage.kind);
-      else if (status.installed) setMessage(element, "Project Code Memory is installed. Start a new Claude session to use it.", "success");
-      else setMessage(element, status.ready ? "Ready to install Project Code Memory." : (status.reason || "Project Code Memory is not ready to install."), "");
+      else if (status.enabled && status.installed) setMessage(element, "On. Claude queries project memory; the gateway maintains it in the background.", "");
+      else if (status.enabled) setMessage(element, status.reason || "On, but the query skill is not installed. Turn it off and on again to reinstall.", "");
+      else setMessage(element, status.ready ? "Off." : (status.reason || "Project Code Memory is not ready."), "");
     }
-    async function installProjectMemory() {
-      if (projectMemoryBusy || document.getElementById("project-memory-install").disabled) return;
-      projectMemoryBusy = true; projectMemoryMessage = null; renderProjectMemory({ ready: true });
-      const button = document.getElementById("project-memory-install");
-      button.textContent = "Installing…"; button.classList.add("busy");
+    async function configureProjectMemory() {
+      const toggle = document.getElementById("project-memory-enabled");
+      if (projectMemoryBusy) return;
+      const wanted = toggle.checked;
+      if (toggle.disabled) { toggle.checked = lastProjectMemory?.enabled === true; return; }
+      projectMemoryBusy = true; projectMemoryMessage = null; toggle.disabled = true;
       try {
-        const result = await apiRequest("/api/auth/project-memory/install", { method: "POST", body: "{}" });
-        if (result.ok !== true || result.installed !== true) throw new Error("Project Code Memory installation could not be confirmed.");
-        projectMemoryMessage = { text: result.changed ? "Project Code Memory installed. Start a new Claude session to use it." : "Project Code Memory is already installed. Start a new Claude session to use it.", kind: "success" };
-      } catch (error) { projectMemoryMessage = { text: error.message || "Project Code Memory installation failed.", kind: "error" }; }
-      projectMemoryBusy = false; button.classList.remove("busy"); button.textContent = "Install Project Code Memory";
+        const result = await apiRequest("/api/auth/project-memory/configure", { method: "POST", body: JSON.stringify({ enabled: wanted }) });
+        if (result.ok !== true || result.enabled !== wanted) throw new Error("Project Code Memory could not be configured.");
+        projectMemoryMessage = { text: wanted ? "Gateway-maintained Project Code Memory is on. Start a new Claude session to use it." : "Gateway-maintained Project Code Memory is off. Start a new Claude session. Project caches are kept.", kind: "success" };
+      } catch (error) { projectMemoryMessage = { text: error.message || "Project Code Memory could not be configured.", kind: "error" }; toggle.checked = lastProjectMemory?.enabled === true; }
+      projectMemoryBusy = false;
       await refreshStatus();
     }
 
@@ -509,7 +513,7 @@
         document.getElementById("storage-path").textContent = "Credential directory: temporarily unavailable";
         document.getElementById("macos-service-configure").disabled = true;
         setMessage(document.getElementById("macos-service-status"), "Unable to load macOS service status. Configuration is disabled.", "error");
-        document.getElementById("project-memory-install").disabled = true;
+        document.getElementById("project-memory-enabled").disabled = true;
         document.getElementById("coding-discipline-install").disabled = true;
         document.getElementById("online-summary-enabled").disabled = true;
         document.getElementById("online-summary-model").disabled = true;
@@ -517,7 +521,7 @@
         document.getElementById("online-summary-retention").disabled = true;
         for (const id of ["online-summary-prompt", "online-summary-prompt-save", "online-summary-prompt-reset"]) document.getElementById(id).disabled = true;
         if (!onlineSummaryMessage) setMessage(document.getElementById("online-summary-status"), "Unable to load Online Summary settings.", "error");
-        if (!projectMemoryMessage) setMessage(document.getElementById("project-memory-status"), "Unable to load Project Code Memory status. Installation is disabled.", "error");
+        if (!projectMemoryMessage) { document.getElementById("project-memory-enabled").checked = false; setMessage(document.getElementById("project-memory-status"), "Unable to load Project Code Memory status. The setting is disabled.", "error"); }
         if (!codingDisciplineMessage) setMessage(document.getElementById("coding-discipline-status"), "Unable to load Coding Discipline status. Installation is disabled.", "error");
       }
     }
@@ -674,7 +678,7 @@
       saveOnlineSummary({ prompt: document.getElementById("online-summary-prompt").value }));
     document.getElementById("online-summary-prompt-reset").addEventListener("click", () => saveOnlineSummary({ prompt: null }));
     document.getElementById("macos-service-configure").addEventListener("click", configureMacosService);
-    document.getElementById("project-memory-install").addEventListener("click", installProjectMemory);
+    document.getElementById("project-memory-enabled").addEventListener("change", configureProjectMemory);
     document.getElementById("coding-discipline-install").addEventListener("click", installCodingDiscipline);
 
     for (const provider of providers) {

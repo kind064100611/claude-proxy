@@ -30,7 +30,6 @@ test("bundle manifest identifies the pinned upstream and approved install files"
   });
   assert.deepEqual(manifest.installFiles, [
     "scripts/pcm.py",
-    "references/record-format.md",
     "LICENSE",
     "SOURCE.md",
     "SKILL.md",
@@ -71,14 +70,19 @@ test("core upstream originals are identified and the Python implementation is un
   );
 });
 
-test("bundle documentation names the Claude skill location and operational constraints", () => {
+test("bundle documentation names the Claude skill location, query-only use and operational constraints", () => {
   const skill = fs.readFileSync(path.join(bundleRoot, "SKILL.md"), "utf8");
   const readme = fs.readFileSync(path.join(bundleRoot, "README.md"), "utf8");
   assert.match(skill, /Python 3\.9 or newer/);
   assert.match(skill, /python -I -B/);
   assert.match(skill, /py -3 -I -B/);
   assert.match(skill, /absolute-skill-dir/);
-  assert.match(skill, /references\/record-format\.md/);
+  assert.doesNotMatch(skill, /references\/record-format\.md/);
+  assert.match(skill, /Never maintain records yourself/);
+  assert.match(skill, /Do not write drafts, run `save`, `audit`, or `reindex`/);
+  assert.match(skill, /`VALID` only means the SHA-256 fingerprints/);
+  assert.match(skill, /read the cited lines/);
+  assert.match(skill, /ProjectMemoryUpdate/);
   assert.match(skill, /not an automatically installed hook/);
   assert.match(skill, /creating the target `projectCodeMemory\/` cache/);
   assert.match(readme, /~\/\.claude\/skills\/project-code-memory/);

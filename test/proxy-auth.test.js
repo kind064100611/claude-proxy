@@ -14,5 +14,9 @@ for (const platform of ["mac", "windows"]) {
     assert.match(source, /createMacosService\(\{ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy \}\)/);
     assert.match(source, /const authRouter = createAuthRouter\(\{[\s\S]*?macosService,/);
     assert.doesNotMatch(source, /macosService\.configure\(/);
+    assert.match(source, /projectMemory: projectMemoryInstaller/);
+    assert.match(source, /projectMemoryInstaller\.autoEnable\(\)/);
+    assert.match(source, /complete: summaryModel\.complete/);
+    assert.match(source, /server\.listen\(PORT, "127\.0\.0\.1"/);
   });
 }

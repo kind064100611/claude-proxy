@@ -182,3 +182,88 @@ for (const platform of ["mac", "windows"]) {
     }
   });
 }
+
+for (const platform of ["mac", "windows"]) {
+  test(`${platform} answers the project memory follow-up locally and forwards everything else rewritten`, { timeout: 5000 }, async () => {
+    const filename = path.resolve(platform, "proxy.js");
+    const nativeRequire = createRequire(filename);
+    const forwarded = [];
+    const enqueued = [];
+    const summaryOptions = [];
+    let projectMemory = true;
+    let route;
+    const context = {
+      require: (name) => name === "../lib/online-summary" ? { ...nativeRequire(name),
+        createOnlineSummary: () => ({ getStatus: () => ({ projectMemory }), prepare: async (body, options) => { summaryOptions.push(options); return { body, stats: {} }; }, cleanup: () => 0 }) }
+        : name === "../lib/project-memory-maintainer" ? { createProjectMemoryMaintainer: () => ({ enqueue: (input) => { enqueued.push(input); return new Promise(() => {}); } }) }
+        : name === "../lib/openai-responses" ? { ...responses, requestResponses: async () => { throw new Error("upstream must not be called"); } }
+        : name === "../lib/github-copilot" ? { ...nativeRequire(name), forwardClaudeRequest: async (body, request, response) => {
+          forwarded.push(body);
+          response.end(JSON.stringify({ type: "message", model: body.model, content: [] }));
+        } }
+        : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [] }) }
+        : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) }
+        : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) }
+        : name === "http" ? { createServer: (handler) => { route = handler; return {}; } } : nativeRequire(name),
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
+      setTimeout, clearTimeout, setInterval, clearInterval
+    };
+    const source = fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0];
+    vm.runInNewContext(source, context, { filename });
+    const send = async (payload, url = "/v1/messages?beta=true") => {
+      const request = new EventEmitter();
+      Object.assign(request, { method: "POST", url, headers: {} });
+      const response = new EventEmitter();
+      let output = "";
+      Object.assign(response, { setHeader() {}, writeHead(status, headers) { response.status = status; response.headers = headers; },
+        write: (data) => { output += data; return true; } });
+      const done = new Promise((resolve) => { response.end = (data) => { if (data) output += data; response.writableEnded = true; response.emit("finish"); resolve(output); }; });
+      await route(request, response);
+      request.emit("data", Buffer.from(JSON.stringify(payload)));
+      request.emit("end");
+      return { body: await done, response };
+    };
+    const call = { type: "tool_use", id: "toolu_memory", name: "ProjectMemoryUpdate", input: { root: "/repo", changed_paths: ["a.js"] } };
+    const result = { type: "tool_result", tool_use_id: "toolu_memory", content: "No such tool available: ProjectMemoryUpdate", is_error: true };
+    const payload = (stream, reply = [result]) => ({ model: "claude-sonnet-5.5", stream, tools: [{ name: "Edit", input_schema: { type: "object" } }],
+      messages: [{ role: "user", content: "edit" }, { role: "assistant", content: [{ type: "text", text: "Done. 完成" }, call] }, { role: "user", content: reply }] });
+
+    const streamed = await send(payload(true));
+    assert.equal(streamed.response.headers["Content-Type"], "text/event-stream");
+    const events = streamed.body.split("\n\n").filter((frame) => frame.startsWith("event:")).map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+    assert.deepEqual(events.map((event) => event.type), ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]);
+    assert.equal(events[2].delta.text, "Done. 完成");
+    assert.equal(events[4].delta.stop_reason, "end_turn");
+    assert.equal(events[4].usage.input_tokens, Math.ceil(Buffer.byteLength(JSON.stringify(payload(true))) / 4));
+    const collected = JSON.parse((await send(payload(false))).body);
+    assert.deepEqual([collected.content[0].text, collected.stop_reason, collected.role], ["Done. 完成", "end_turn", "assistant"]);
+    assert.equal(JSON.stringify(enqueued), JSON.stringify([{ root: "/repo", changed_paths: ["a.js"] }]));
+    assert.equal(forwarded.length, 0);
+
+    await send(payload(true, [result, { type: "text", text: "and one more thing" }]));
+    assert.equal(forwarded.length, 1);
+    assert.equal(JSON.stringify(forwarded[0].messages[2].content[0]), JSON.stringify({ type: "tool_result", tool_use_id: "toolu_memory", content: "Queued.", is_error: false }));
+    assert.equal(forwarded[0].tools.at(-1).name, "ProjectMemoryUpdate");
+    assert.match(forwarded[0].system.at(-1).text, /ProjectMemoryUpdate/);
+    assert.equal(enqueued.length, 1);
+
+    // Token-count subpaths never enqueue or terminate locally, even while enabled.
+    const countPayload = payload(false);
+    countPayload.messages[1].content[1] = { ...call, id: "toolu_count" };
+    countPayload.messages[2].content[0] = { ...result, tool_use_id: "toolu_count" };
+    await send(countPayload, "/v1/messages/count_tokens");
+    assert.equal(forwarded.length, 2);
+    assert.equal(enqueued.length, 1);
+    assert.equal(summaryOptions.at(-1).readOnly, true);
+
+    for (const disabled of [null, false]) {
+      projectMemory = disabled;
+      await send(payload(true));
+      const body = forwarded.at(-1);
+      assert.equal(body.tools.length, 1);
+      assert.equal(body.system, undefined);
+      assert.equal(body.messages[2].content[0].content, "Queued.");
+      assert.equal(enqueued.length, 1);
+    }
+  });
+}

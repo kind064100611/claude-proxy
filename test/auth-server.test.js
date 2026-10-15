@@ -164,31 +164,41 @@ test("real HTTP device completion persists login, hides secrets and invalidates 
   }
 });
 
-test("Project Code Memory API applies local guards, safe status, and fixed failure mapping", async (t) => {
-  let installs = 0;
-  const service = { getStatus: async () => ({ installed: false, ready: true, state: "absent", reason: "unsafe-reason", notice: "unsafe-value", secret: "/private" }), install: async () => { installs++; return { ok: true, changed: false, installed: true, ready: true, state: "installed", secret: "/private" }; } };
+test("Project Code Memory configure route enforces guards, validates bodies, sanitizes status and maps errors", async (t) => {
+  const calls = [];
+  let failure;
+  const service = { getStatus: async () => ({ enabled: false, installed: false, ready: true, state: "absent", reason: "unsafe-reason", notice: "unsafe-value", secret: "/private" }), configure: async (enabled) => { calls.push(enabled); if (failure) throw failure; return { ok: true, changed: true, enabled, installed: enabled, ready: true, state: enabled ? "installed" : "absent", secret: "/private" }; } };
   const { api, port, router, nonce } = await fixture(t, { projectMemory: service });
+  const route = "/api/auth/project-memory/configure";
   let remoteStatus;
-  await router({ url: "/api/auth/project-memory/install", method: "POST", headers: { host: `localhost:${port}`, "x-auth-nonce": nonce },
-    socket: { remoteAddress: "192.0.2.1" } }, { setHeader() {}, writeHead(code) { remoteStatus = code; }, end() {} });
+  await router({ url: route, method: "POST", headers: { host: `localhost:${port}`, "x-auth-nonce": nonce }, socket: { remoteAddress: "192.0.2.1" } }, { setHeader() {}, writeHead(code) { remoteStatus = code; }, end() {} });
   assert.equal(remoteStatus, 403);
   const status = JSON.parse((await api("/api/auth/status")).text);
-  assert.deepEqual(Object.keys(status.projectMemory).sort(), ["installed", "notice", "ready", "reason", "state"]);
-  assert.ok(!(await api("/api/auth/status")).text.includes("/private"));
-  const route = "/api/auth/project-memory/install";
-  for (const headers of [{ "X-Auth-Nonce": "wrong" }, { Origin: "https://evil.example" }, { "Content-Type": "text/plain" }]) assert.equal((await api(route, { method: "POST", body: "{}", headers })).status, 403);
+  assert.deepEqual(Object.keys(status.projectMemory).sort(), ["enabled", "installed", "notice", "ready", "reason", "state"]);
+  assert.equal(status.projectMemory.enabled, false); assert.ok(!(await api("/api/auth/status")).text.includes("/private"));
+  for (const headers of [{ "X-Auth-Nonce": "wrong" }, { Origin: "https://evil.example" }, { "Content-Type": "text/plain" }, { Host: "evil.example" }]) assert.equal((await api(route, { method: "POST", body: '{"enabled":true}', headers })).status, 403);
   assert.equal((await api(route, { method: "OPTIONS" })).status, 405);
-  assert.equal((await request(port, route, { method: "POST", body: "{}" })).status, 403);
-  for (const body of [JSON.stringify({ unexpected: true }), "null", "[]", "1", "\"text\"", "", "{bad}"]) {
-    assert.equal((await api(route, { method: "POST", body })).status, 400);
-  }
-  assert.equal((await api(route, { method: "POST", body: " ".repeat(MAX_AUTH_BODY_BYTES + 1) })).status, 413);
-  assert.equal((await api(route, { method: "POST", body: "{}", headers: { Host: "evil.example" } })).status, 403);
   assert.equal((await api(route)).status, 404);
-  assert.equal(installs, 0);
-  const result = await api(route, { method: "POST", body: "{}" });
-  assert.equal(result.status, 200); assert.equal(result.headers["cache-control"], "no-store");
-  assert.equal(JSON.parse(result.text).changed, false); assert.ok(!result.text.includes("/private")); assert.equal(installs, 1);
+  assert.equal((await request(port, route, { method: "POST", body: '{"enabled":true}' })).status, 403);
+  for (const body of ["{}", '{"enabled":"yes"}', '{"enabled":true,"extra":1}', "null", "[]", "1", "\"text\"", "", "{bad}"]) assert.equal((await api(route, { method: "POST", body })).status, 400);
+  assert.deepEqual(calls, []);
+  for (const enabled of [true, false]) {
+    const result = await api(route, { method: "POST", body: JSON.stringify({ enabled }) });
+    assert.equal(result.status, 200); assert.equal(result.headers["cache-control"], "no-store");
+    assert.equal(JSON.parse(result.text).enabled, enabled); assert.equal(JSON.parse(result.text).changed, true);
+    assert.ok(!result.text.includes("/private"));
+  }
+  assert.deepEqual(calls, [true, false]);
+  failure = Object.assign(new Error("secret raw output"), { code: "PROJECT_MEMORY_CONFLICT" });
+  let conflict = await api(route, { method: "POST", body: '{"enabled":true}' });
+  assert.equal(conflict.status, 409); assert.match(conflict.text, /cannot be enabled/); assert.ok(!conflict.text.includes("secret"));
+  conflict = await api(route, { method: "POST", body: '{"enabled":false}' });
+  assert.equal(conflict.status, 409); assert.match(conflict.text, /Gateway maintenance is off/);
+  failure = Object.assign(new Error("secret raw output"), { code: "EIO" });
+  const failed = await api(route, { method: "POST", body: '{"enabled":true}' });
+  assert.equal(failed.status, 503); assert.match(failed.text, /Python 3.9\+/); assert.ok(!failed.text.includes("secret"));
+  assert.equal((await api(route, { method: "POST", body: " ".repeat(MAX_AUTH_BODY_BYTES + 1) })).status, 413);
+  assert.equal((await api("/api/auth/project-memory/install", { method: "POST", body: "{}" })).status, 404);
 });
 
 test("Project Code Memory installs independently of damaged settings and absent proxy credentials", async (t) => {
@@ -196,37 +206,39 @@ test("Project Code Memory installs independently of damaged settings and absent 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(path.join(root, "settings.json"), "{damaged settings");
   const projectMemory = require("../lib/project-memory-install").createProjectMemoryInstaller({ configRoot: root,
-    probe: async () => ({ cli: true, python: true }) });
+    featureFile: path.join(root, "gateway-features.json"), probe: async () => ({ cli: true, python: true }) });
   const { api } = await fixture(t, { env: {}, projectMemory, setupFactory: (store) => createClaudeSetup({ configRoot: root, store, env: {},
     probe: async () => ({ cli: true }) }) });
   const status = JSON.parse((await api("/api/auth/status")).text);
   assert.equal(status.claudeCli.ready, false);
   assert.equal(status.chatgpt.configured, false);
   assert.equal(status.projectMemory.ready, true);
-  const response = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+  const response = await api("/api/auth/project-memory/configure", { method: "POST", body: '{"enabled":true}' });
   assert.equal(response.status, 200);
   assert.equal(JSON.parse(response.text).installed, true);
+  assert.equal(JSON.parse(response.text).enabled, true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "gateway-features.json"), "utf8")).projectMemory, true);
   assert.equal(fs.readFileSync(path.join(root, "settings.json"), "utf8"), "{damaged settings");
 });
 
 test("Project Code Memory fixed errors and unavailable status do not leak raw data", async (t) => {
   for (const code of ["PROJECT_MEMORY_CONFLICT", "PROJECT_MEMORY_UNAVAILABLE", "EIO"]) {
     const { api } = await fixture(t, { projectMemory: { getStatus: async () => ({ state: "secret_code", ready: true, installed: true, reason: "private reason" }),
-      install: async () => { throw Object.assign(new Error("private output"), { code }); } } });
+      configure: async () => { throw Object.assign(new Error("private output"), { code }); } } });
     const status = JSON.parse((await api("/api/auth/status")).text).projectMemory;
     assert.equal(status.state, "unavailable"); assert.equal(status.ready, false);
     assert.ok(!JSON.stringify(status).includes("private"));
-    const result = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+    const result = await api("/api/auth/project-memory/configure", { method: "POST", body: '{"enabled":true}' });
     assert.equal(result.status, code === "PROJECT_MEMORY_CONFLICT" ? 409 : 503);
     assert.ok(!result.text.includes("private"));
   }
 });
 
 test("Project Code Memory status failure is isolated and installer errors are sanitized", async (t) => {
-  const { api } = await fixture(t, { projectMemory: { getStatus: async () => { throw new Error("private fs"); }, install: async () => { throw Object.assign(new Error("private output"), { code: "PROJECT_MEMORY_CONFLICT" }); } } });
+  const { api } = await fixture(t, { projectMemory: { getStatus: async () => { throw new Error("private fs"); }, configure: async () => { throw Object.assign(new Error("private output"), { code: "PROJECT_MEMORY_CONFLICT" }); } } });
   const status = JSON.parse((await api("/api/auth/status")).text);
   assert.equal(status.projectMemory.state, "unavailable");
-  const result = await api("/api/auth/project-memory/install", { method: "POST", body: "{}" });
+  const result = await api("/api/auth/project-memory/configure", { method: "POST", body: '{"enabled":true}' });
   assert.equal(result.status, 409); assert.ok(!result.text.includes("private"));
 });
 

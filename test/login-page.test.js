@@ -9,7 +9,7 @@ function pageHarness(_unused, { status, configure, requestImpl, fastWait = false
   const elements = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, {
-      value: "", textContent: "", dataset: {}, hidden: true, disabled: ["cli-configure", "statusline-configure", "macos-service-configure", "project-memory-install", "coding-discipline-install"].includes(id), attributes: {}, listeners: {}, classList: { add() {}, remove() {} },
+      value: "", textContent: "", dataset: {}, hidden: true, disabled: ["cli-configure", "statusline-configure", "macos-service-configure", "project-memory-enabled", "coding-discipline-install"].includes(id), attributes: {}, listeners: {}, classList: { add() {}, remove() {} },
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, handler) { this.listeners[name] = handler; },
       replaceChildren(...children) { this.children = children; }
@@ -45,58 +45,56 @@ function pageHarness(_unused, { status, configure, requestImpl, fastWait = false
   };
 }
 
-test("Project Code Memory card is independently gated and installation feedback is isolated", async () => {
-  const page = pageHarness(async () => [], { status: () => ({ projectMemory: { ready: true } }),
-    configure: async () => ({ ok: true, json: async () => ({ ok: true, installed: true, changed: false }) }) });
-  assert.equal(page.element("project-memory-install").disabled, true);
-  assert.equal(page.requests.filter((item) => item.url.endsWith("/status")).length, 1);
-  await page.refresh();
-  assert.equal(page.element("project-memory-install").disabled, false);
-  await page.element("project-memory-install").listeners.click();
-  assert.equal(page.requests.filter((item) => item.url.endsWith("/project-memory/install")).length, 1);
-  assert.equal(page.requests.find((item) => item.url.endsWith("/project-memory/install")).options.body, "{}");
-  assert.match(page.element("project-memory-status").textContent, /already installed.*new Claude session/i);
-  assert.equal(page.requests.filter((item) => item.url.endsWith("/status")).length, 3);
+test("Project Code Memory checkbox gates, configures, reports success, and restores on failure", async () => {
+  let enabled = false;
+  const page = pageHarness(async () => [], { status: () => ({ projectMemory: { enabled, ready: true, installed: enabled, state: enabled ? "installed" : "absent" } }),
+    configure: async (url, options) => response({ ok: true, enabled: JSON.parse(options.body).enabled }) });
+  const toggle = page.element("project-memory-enabled");
+  assert.equal(toggle.disabled, true);
+  await page.refresh(); assert.equal(toggle.disabled, false); assert.equal(toggle.checked, false);
+  toggle.checked = true; await toggle.listeners.change();
+  assert.equal(JSON.parse(page.requests.find((r) => r.url.endsWith("/project-memory/configure")).options.body).enabled, true);
+  assert.equal(page.element("project-memory-status").textContent, "Gateway-maintained Project Code Memory is on. Start a new Claude session to use it.");
+  enabled = true; await page.refresh(); assert.equal(toggle.checked, true); assert.equal(toggle.disabled, false);
+  enabled = false;
+  toggle.checked = false; await toggle.listeners.change();
+  assert.equal(page.element("project-memory-status").textContent, "Gateway-maintained Project Code Memory is off. Start a new Claude session. Project caches are kept.");
+  const failing = pageHarness(async () => [], { status: () => ({ projectMemory: { enabled: false, ready: true } }), configure: async () => response({ error: "Fixed conflict." }, 409) });
+  await failing.refresh(); failing.element("project-memory-enabled").checked = true; await failing.element("project-memory-enabled").listeners.change();
+  assert.equal(failing.element("project-memory-enabled").checked, false); assert.equal(failing.element("project-memory-status").textContent, "Fixed conflict.");
 });
 
-test("Project Code Memory prevents duplicate clicks and keeps other configure feedback", async () => {
+test("Project Code Memory blocks duplicate changes, permits off during conflict, and keeps independent feedback", async () => {
   let finish;
-  let installed = false;
-  const page = pageHarness(async () => [], { status: () => ({ claudeCli: { ready: true }, statusline: { ready: true }, projectMemory: { ready: true, installed } }),
+  let enabled = true;
+  const page = pageHarness(async () => [], { status: () => ({ claudeCli: { ready: true }, statusline: { ready: true },
+    projectMemory: { enabled, installed: false, ready: false, state: "conflict", reason: "conflict" } }),
     configure: async (url) => {
-      if (!url.endsWith("/install")) return response({ success: true });
-      return new Promise((resolve) => { finish = () => { installed = true; resolve(response({ ok: true, installed: true, changed: true })); }; });
+      if (!url.endsWith("/project-memory/configure")) return response({ success: true });
+      return new Promise((resolve) => { finish = () => { enabled = false; resolve(response({ ok: true, enabled: false })); }; });
     } });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(page.requests.filter((item) => item.url.endsWith("/status")).length, 1);
   await page.element("cli-configure").listeners.click();
   const cliMessage = page.element("cli-status").textContent;
-  const first = page.element("project-memory-install").listeners.click();
-  assert.equal(page.element("project-memory-install").disabled, true);
+  const toggle = page.element("project-memory-enabled"); assert.equal(toggle.disabled, false); assert.equal(toggle.checked, true);
+  toggle.checked = false; const first = toggle.listeners.change(); assert.equal(toggle.disabled, true); await toggle.listeners.change();
   assert.equal(page.element("statusline-configure").disabled, false);
-  await page.element("project-memory-install").listeners.click();
-  assert.equal(page.requests.filter((item) => item.url.endsWith("/install")).length, 1);
-  finish(); await first;
-  assert.match(page.element("project-memory-status").textContent, /installed.*new Claude session/i);
-  assert.equal(page.element("project-memory-install").disabled, true);
+  assert.equal(page.requests.filter((r) => r.url.endsWith("/project-memory/configure")).length, 1); finish(); await first;
+  assert.equal(toggle.checked, false);
   assert.equal(page.element("cli-status").textContent, cliMessage);
 });
 
-test("Project Code Memory errors are parsed and status failure disables installation", async () => {
+test("Project Code Memory status failure disables the checkbox", async () => {
   let failStatus = false;
   const page = pageHarness(async () => [], { status: () => {
     if (failStatus) throw new Error("offline");
-    return { projectMemory: { ready: true } };
-  }, configure: async () => response({ error: "Fixed install conflict." }, 409) });
+    return { projectMemory: { enabled: false, ready: true } };
+  } });
   await page.refresh();
-  await page.element("project-memory-install").listeners.click();
-  assert.equal(page.element("project-memory-status").textContent, "Fixed install conflict.");
+  assert.equal(page.element("project-memory-enabled").disabled, false);
   failStatus = true; await page.refresh();
-  assert.equal(page.element("project-memory-install").disabled, true);
-  const unavailable = pageHarness(async () => [], { status: () => { throw new Error("offline"); } });
-  await unavailable.refresh();
-  assert.equal(unavailable.element("project-memory-install").disabled, true);
-  assert.match(unavailable.element("project-memory-status").textContent, /Unable to load/);
+  assert.equal(page.element("project-memory-enabled").disabled, true);
+  assert.equal(page.element("project-memory-status").textContent, "Unable to load Project Code Memory status. The setting is disabled.");
 });
 
 test("Coding Discipline card is independently gated and reports install, already-installed and conflict results", async () => {
@@ -107,7 +105,7 @@ test("Coding Discipline card is independently gated and reports install, already
   assert.equal(page.element("coding-discipline-install").disabled, true);
   await page.refresh();
   assert.equal(page.element("coding-discipline-install").disabled, false);
-  assert.equal(page.element("project-memory-install").disabled, true);
+  assert.equal(page.element("project-memory-enabled").disabled, true);
   await page.element("coding-discipline-install").listeners.click();
   const posts = page.requests.filter((item) => item.url.endsWith("/coding-discipline/install"));
   assert.equal(posts.length, 1); assert.equal(posts[0].options.body, "{}");
@@ -118,7 +116,7 @@ test("Coding Discipline card is independently gated and reports install, already
   outcome = response({ error: "Fixed install conflict." }, 409);
   await page.element("coding-discipline-install").listeners.click();
   assert.equal(page.element("coding-discipline-status").textContent, "Fixed install conflict.");
-  assert.equal(page.element("project-memory-status").textContent, "Project Code Memory is not ready to install.");
+  assert.equal(page.element("project-memory-status").textContent, "Project Code Memory is not ready.");
 });
 
 test("Coding Discipline status failure disables installation", async () => {

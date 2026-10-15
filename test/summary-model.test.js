@@ -114,6 +114,26 @@ test("default model and selectable list come from the catalog without failing th
   assert.deepEqual(await broken.listModels(), []);
 });
 
+test("complete tries Luna then Haiku with the given system prompt, ignores the preferred model and returns null when all fail", async () => {
+  const requests = [];
+  const sent = [];
+  const loadClaudeAuth = async () => ({ baseUrl: "https://copilot.test", token: "test-token" });
+  const { complete } = createSummaryModel({ getAvailableModels: catalog(["gpt-6-luna", "claude-haiku-5.5", "gpt-6.1-sol"]),
+    getPreferredModel: () => "gpt-6.1-sol", loadClaudeAuth,
+    requestResponsesImpl: async (body, options) => { requests.push({ body, options }); throw Object.assign(new Error("busy"), { status: 429 }); },
+    fetchImpl: async (url, options) => { sent.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ content: [{ type: "text", text: "{\"save\":[]}" }] }) }; } });
+  assert.deepEqual(await complete({ system: "maintain", input: "files", maxTokens: 8192 }), { model: "claude-haiku-5.5", text: "{\"save\":[]}" });
+  assert.deepEqual(requests.map((request) => request.body.model), ["gpt-6-luna"]);
+  assert.equal(requests[0].body.max_tokens, 8192);
+  assert.equal(requests[0].body.messages[0].content, "maintain");
+  assert.equal(requests[0].options.remember, false);
+  assert.deepEqual([sent[0].system, sent[0].max_tokens], ["maintain", 8192]);
+  const { complete: failing } = createSummaryModel({ getAvailableModels: catalog(["gpt-6-luna"]), timeoutMs: 1000,
+    requestResponsesImpl: (body, { control }) => new Promise((_, reject) => { control.abort = (message, status) => reject(Object.assign(new Error(message), { status })); }) });
+  assert.equal(await failing({ system: "s", input: "i", timeoutMs: 20 }), null);
+  assert.equal(await createSummaryModel({ getAvailableModels: catalog([]) }).complete({ system: "s", input: "i" }), null);
+});
+
 test("a saved custom prompt replaces the built-in system prompt for GPT and Claude, and null restores it", async () => {
   let prompt = "Custom summary prompt.";
   const systems = [];
