@@ -212,7 +212,7 @@ test("launchctl print failure refuses unverified bootout and records recovery fa
 });
 
 for (const cancelled of [false, true]) {
-  test(`helper without response-finish activation ${cancelled ? "cancels" : "expires"} without stopping the old proxy`, async (t) => {
+  test(`helper without response-finish activation ${cancelled ? "cancels" : "expires"} without stopping the old proxy`, lifecycleOptions, async (t) => {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "helper-no-activation-")));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const proxyPath = path.join(root, "repo", "mac", "proxy.js");

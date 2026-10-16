@@ -1,0 +1,5 @@
+@echo off
+setlocal
+rem Stops any process listening on port 8082, then starts the proxy hidden with logs in %USERPROFILE%\.claude\claude-proxy\proxy-<time>.out/err.log.
+set "CLAUDE_PROXY_JS=%~dp0proxy.js"
+start "" /min "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetTCPConnection -State Listen -LocalPort 8082 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction Stop; Wait-Process -Id $_ -Timeout 10 -ErrorAction SilentlyContinue }; Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue; $env:NODE_TLS_REJECT_UNAUTHORIZED = '1'; $log = Join-Path $env:USERPROFILE ('.claude\claude-proxy\proxy-' + (Get-Date -Format 'yyyyMMdd-HHmmss')); Start-Process -FilePath (Get-Command node -ErrorAction Stop).Source -ArgumentList '--use-system-ca', ('\"' + $env:CLAUDE_PROXY_JS + '\"') -WorkingDirectory (Split-Path (Split-Path $env:CLAUDE_PROXY_JS)) -WindowStyle Hidden -RedirectStandardOutput ($log + '.out.log') -RedirectStandardError ($log + '.err.log')"

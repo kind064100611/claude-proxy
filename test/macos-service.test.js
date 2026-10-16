@@ -4,6 +4,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { createMacosService, SERVICE_LABEL } = require("../lib/macos-service");
+const posixOptions = { skip: process.platform === "win32" && "Requires POSIX ownership, permissions and filenames" };
 
 const makeHarness = (overrides = {}) => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "macos-service-test-&<")));
@@ -51,27 +52,45 @@ const makeHarness = (overrides = {}) => {
   return { root, configRoot, repoRoot, plistPath, calls, service, forkCount: () => forkCalls };
 };
 
-test("service identity and paths are isolated under the selected CLI root", (t) => {
-  const h = makeHarness();
-  t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
-  assert.equal(SERVICE_LABEL, "com.shanshazhe.claude-proxy");
-  const service = h.service();
-  assert.equal(service.internals.plistPath, path.join(h.root, "Library", "LaunchAgents", "com.shanshazhe.claude-proxy.plist"));
-  assert.equal(service.internals.privateRoot, path.join(h.configRoot, "claude-proxy", "macos-service"));
-  assert.equal(h.calls.length, 0);
-  assert.equal(h.forkCount(), 0);
-});
-
 test("unsupported platform reports unavailable without process, filesystem, or launchctl side effects", async () => {
-  let commands = 0;
-  const result = await createMacosService({ platform: "linux", home: "/never", configRoot: "/never", nodePath: "node", proxyPath: "/never", uid: 1,
-    env: {}, execArgv: [], fsImpl: { ...fs, mkdirSync() { assert.fail("filesystem mutation"); } },
-    execFileImpl() { commands++; }, forkImpl() { assert.fail("must not fork"); } }).getStatus();
-  assert.equal(result.supported, false);
-  assert.equal(commands, 0);
+  for (const platform of ["linux", "win32"]) {
+    let commands = 0;
+    const result = await createMacosService({ platform, home: "/never", configRoot: "/never", nodePath: "node", proxyPath: "/never", uid: 1,
+      env: {}, execArgv: [], fsImpl: { ...fs, mkdirSync() { assert.fail("filesystem mutation"); } },
+      execFileImpl() { commands++; }, forkImpl() { assert.fail("must not fork"); } }).getStatus();
+    assert.equal(result.supported, false);
+    assert.equal(commands, 0);
+  }
 });
 
-test("missing GUI domain or uid is unavailable and sanitized", async (t) => {
+test("service identity and paths are isolated under the selected CLI root", () => {
+  const root = path.join(os.tmpdir(), "macos-service-identity");
+  const configRoot = path.join(root, "config");
+  const service = createMacosService({ platform: "darwin", home: root, configRoot,
+    execFileImpl() { assert.fail("must not execute processes"); }, forkImpl() { assert.fail("must not fork"); } });
+  assert.equal(SERVICE_LABEL, "com.shanshazhe.claude-proxy");
+  assert.equal(service.internals.plistPath, path.join(root, "Library", "LaunchAgents", "com.shanshazhe.claude-proxy.plist"));
+  assert.equal(service.internals.privateRoot, path.join(configRoot, "claude-proxy", "macos-service"));
+});
+
+test("launchctl job parser returns the expected protected identity fields", async () => {
+  const root = path.join(os.tmpdir(), "macos-service-parser");
+  const proxyPath = path.join(root, "repo", "mac", "proxy.js");
+  const plistPath = path.join(root, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
+  const args = [process.execPath, proxyPath];
+  const uid = 501;
+  const output = `gui/${uid}/${SERVICE_LABEL} = {\n path = ${plistPath}\n program = ${process.execPath}\n working directory = ${path.dirname(path.dirname(proxyPath))}\n arguments = {\n  0 = ${args[0]}\n  1 = ${args[1]}\n }\n state = running\n pid = ${process.pid}\n}\n`;
+  const service = createMacosService({ platform: "darwin", home: root, uid, proxyPath,
+    execFileImpl: (file, commandArgs, options, callback) => {
+      assert.equal(file, "/bin/launchctl");
+      assert.deepEqual(commandArgs, ["print", `gui/${uid}/${SERVICE_LABEL}`]);
+      callback(null, output, "");
+    } });
+  const job = await service.internals.job();
+  assert.deepEqual(job, { program: process.execPath, path: plistPath, args, workingDirectory: path.dirname(path.dirname(proxyPath)), environment: {}, pid: process.pid, running: true });
+});
+
+test("missing GUI domain or uid is unavailable and sanitized", posixOptions, async (t) => {
   const h = makeHarness({ gui: false });
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const status = await h.service().getStatus();
@@ -81,7 +100,7 @@ test("missing GUI domain or uid is unavailable and sanitized", async (t) => {
   assert.doesNotMatch(JSON.stringify(status), /\/Users\/|config|stderr/i);
 });
 
-test("unsafe plist symlink and malformed plist are rejected", async (t) => {
+test("unsafe plist symlink and malformed plist are rejected", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   fs.mkdirSync(path.dirname(h.plistPath), { recursive: true });
@@ -94,7 +113,7 @@ test("unsafe plist symlink and malformed plist are rejected", async (t) => {
   assert.equal(status.registered, false);
 });
 
-test("launchctl absence codes 113 and 3 are treated as an unregistered job", async (t) => {
+test("launchctl absence codes 113 and 3 are treated as an unregistered job", posixOptions, async (t) => {
   for (const code of [113, 3]) {
     const h = makeHarness({ job: { code, stderr: "absent" } });
     t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
@@ -107,7 +126,7 @@ test("launchctl absence codes 113 and 3 are treated as an unregistered job", asy
   }
 });
 
-test("unsafe environment and unsupported TLS arguments are rejected without exposing values", async (t) => {
+test("unsafe environment and unsupported TLS arguments are rejected without exposing values", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   for (const env of [{ OPENAI_API_KEY: "secret" }, { PI_AUTH_FILE: "/private/auth.json" },
@@ -121,20 +140,7 @@ test("unsafe environment and unsupported TLS arguments are rejected without expo
   assert.doesNotMatch(JSON.stringify(tlsStatus), /tls-reject|unauthorized/);
 });
 
-test("launchctl job parser returns the expected protected identity fields", async (t) => {
-  const h = makeHarness();
-  t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
-  const args = [process.execPath, path.join(h.repoRoot, "mac", "proxy.js")];
-  const output = `gui/${process.getuid()}/${SERVICE_LABEL} = {\n path = ${h.plistPath}\n program = ${process.execPath}\n working directory = ${h.repoRoot}\n arguments = {\n  0 = ${args[0]}\n  1 = ${args[1]}\n }\n state = running\n pid = ${process.pid}\n}\n`;
-  const service = h.service({ execFileImpl: (file, commandArgs, options, callback) => {
-    const isJob = file === "/bin/launchctl" && commandArgs[1] === `gui/${process.getuid()}/${SERVICE_LABEL}`;
-    callback(isJob ? null : Object.assign(new Error("unexpected mock command"), { code: 113 }), isJob ? output : "", "");
-  } });
-  const job = await service.internals.job();
-  assert.deepEqual(job, { program: process.execPath, path: h.plistPath, args, workingDirectory: h.repoRoot, environment: {}, pid: process.pid, running: true });
-});
-
-test("matching running service is a no-op even with transfer-blocked environment", async (t) => {
+test("matching running service is a no-op even with transfer-blocked environment", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const args = [process.execPath, path.join(h.repoRoot, "mac", "proxy.js")];
@@ -161,7 +167,7 @@ test("matching running service is a no-op even with transfer-blocked environment
   assert.deepEqual(fs.readFileSync(h.plistPath), originalBytes);
 });
 
-test("matching stopped registration is reusable without rewriting its plist", async (t) => {
+test("matching stopped registration is reusable without rewriting its plist", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const args = [process.execPath, path.join(h.repoRoot, "mac", "proxy.js")];
@@ -188,7 +194,7 @@ test("matching stopped registration is reusable without rewriting its plist", as
   assert.deepEqual(fs.readFileSync(h.plistPath), original);
 });
 
-test("new registration serializes only the allowlisted environment and XML-escapes paths", async (t) => {
+test("new registration serializes only the allowlisted environment and XML-escapes paths", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   let stagedXml = "";
@@ -222,7 +228,7 @@ test("new registration serializes only the allowlisted environment and XML-escap
   assert.doesNotMatch(stagedXml, /UNSUPPORTED_RATE_SETTING|OPENAI_API_KEY|DEBUG_VERBOSE/);
 });
 
-test("failed helper readiness leaves recovery information but never hands off the proxy", async (t) => {
+test("failed helper readiness leaves recovery information but never hands off the proxy", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   let handoffs = 0;
@@ -243,7 +249,7 @@ test("failed helper readiness leaves recovery information but never hands off th
   assert.equal(status.operation.errorCode, "preparation");
 });
 
-test("loaded job or existing plist with a different installation is a conflict", async (t) => {
+test("loaded job or existing plist with a different installation is a conflict", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const plist = { Label: SERVICE_LABEL, ProgramArguments: [process.execPath, "/other/proxy.js"], WorkingDirectory: "/other", RunAtLoad: true, KeepAlive: true };
@@ -266,7 +272,7 @@ function preparationExec(file, args, options, callback) {
   callback(null, "");
 }
 
-test("readonly status performs no writes or service/model startup and is briefly cached", async (t) => {
+test("readonly status performs no writes or service/model startup and is briefly cached", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const service = h.service({ fsImpl: { ...fs, writeFileSync() { assert.fail("status write"); }, mkdirSync() { assert.fail("status mkdir"); },
@@ -280,7 +286,7 @@ test("readonly status performs no writes or service/model startup and is briefly
   assert.equal(h.calls.some((call) => ["bootstrap", "bootout", "kickstart"].includes(call.args[0])), false);
 });
 
-test("parallel registration uses one helper and preserves live lock despite age or unavailable process identity", async (t) => {
+test("parallel registration uses one helper and preserves live lock despite age or unavailable process identity", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const service = h.service({ execFileImpl: preparationExec });
@@ -296,7 +302,7 @@ test("parallel registration uses one helper and preserves live lock despite age 
   assert.equal(h.forkCount(), 1);
 });
 
-test("a helper that dies after ready cannot strand an active lock or stop the current proxy", async (t) => {
+test("a helper that dies after ready cannot strand an active lock or stop the current proxy", posixOptions, async (t) => {
   const { EventEmitter } = require("events");
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
@@ -322,7 +328,7 @@ test("a helper that dies after ready cannot strand an active lock or stop the cu
   assert.equal(fs.existsSync(service.internals.lockPath), false);
 });
 
-test("external modification during lint prevents publishing and is never removed or replaced", async (t) => {
+test("external modification during lint prevents publishing and is never removed or replaced", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   let stage;
@@ -336,7 +342,7 @@ test("external modification during lint prevents publishing and is never removed
   assert.equal(h.forkCount(), 0);
 });
 
-test("launchd disabled overrides, invalid uid and unsupported Node certificate flags are rejected", async (t) => {
+test("launchd disabled overrides, invalid uid and unsupported Node certificate flags are rejected", posixOptions, async (t) => {
   const h = makeHarness();
   t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
   const disabled = h.service({ execFileImpl: (file, args, options, callback) => {
@@ -353,7 +359,7 @@ test("launchd disabled overrides, invalid uid and unsupported Node certificate f
   await assert.rejects(oldNode.configure(), /startup environment|Node arguments/);
 });
 
-test("private symlinks, loose permissions and hardlinked log files are refused", async (t) => {
+test("private symlinks, loose permissions and hardlinked log files are refused", posixOptions, async (t) => {
   for (const unsafe of ["symlink", "permissions", "hardlink"]) {
     const h = makeHarness();
     t.after(() => fs.rmSync(h.root, { recursive: true, force: true }));
