@@ -27,6 +27,10 @@ test("injection needs the flag and an Edit or Write tool, and appends one consta
   assert.deepEqual(injected.system.map((block) => block.type), ["text", "text"]);
   assert.equal(injected.system[0].text, "You are Claude Code.");
   assert.match(injected.system[1].text, /exactly one ProjectMemoryUpdate call as the last block/);
+  assert.match(injected.system[1].text, /during read-only analysis, or found records wrong or useless,/);
+  assert.match(injected.system[1].text, /pass an empty changed_paths array/);
+  assert.match(injected.system[1].text, /when there are no source\/test changes, new verified reusable knowledge or wrong records to report/);
+  assert.match(injected.tools.at(-1).input_schema.properties.changed_paths.description, /Use an empty array for read-only analysis/);
   assert.equal(plain.tools.length, 2);
   assert.equal(typeof plain.system, "string");
   for (const system of [undefined, ""]) assert.equal(gateway.prepare({ ...plain, system }, { enabled: true }).body.system.length, 1);

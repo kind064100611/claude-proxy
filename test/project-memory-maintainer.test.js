@@ -84,6 +84,21 @@ test("a learned topic becomes a new record and an obsolete record is deleted", {
   assert.match(m.calls[0].input, /SessionStore creates sessions/);
 });
 
+test("a read-only analysis refreshes the valid record that cites its learned files", { skip }, async (t) => {
+  const root = repository(t);
+  seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
+  seed(root, { id: "store-topic", paths: ["src/store.js"], keywords: ["store"] });
+  const m = maintainer({ save: [draft({ id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate", "SessionStore"] })], delete: [] });
+  const result = await m.enqueue({ root, changed_paths: [],
+    learned: [{ topic: "auth", facts: ["authenticate delegates to SessionStore.create"], paths: ["src/auth.js"], symbols: ["authenticate"] }] });
+  assert.deepEqual([result.saved, result.deleted, result.rejected], [1, 0, 0]);
+  assert.deepEqual(record(root, "auth-flow").s, ["authenticate", "SessionStore"]);
+  assert.notEqual(record(root, "store-topic"), null);
+  assert.match(m.calls[0].input, /Changed paths: \(none reported\)/);
+  assert.match(m.calls[0].input, /Affected records:\n.*"id":"auth-flow"/);
+  assert.match(m.calls[0].input, /Other existing record ids \(never reuse\): store-topic\n/);
+});
+
 test("a stale record the model neither refreshes nor deletes is deleted, and valid unrelated records stay", { skip }, async (t) => {
   const root = repository(t);
   seed(root, { id: "store-topic", paths: ["src/store.js"], keywords: ["store"] });
