@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PassThrough } = require("stream");
-const { forwardClaudeRequest, getCopilotHeaders, discoverCopilotModels } = require("../lib/github-copilot");
+const { forwardClaudeRequest, getCopilotHeaders, discoverCopilotModels, listCopilotResponsesModels, loadCopilotResponsesAuth } = require("../lib/github-copilot");
 const { prepareClaudeCache } = require("../lib/anthropic-cache");
 
 const auth = { token: "copilot-test-token", baseUrl: "https://api.business.githubcopilot.com" };
@@ -152,4 +152,25 @@ test("Copilot client disconnect aborts upstream without buffering the SSE respon
   await assert.rejects(operation);
   assert.equal(signal.aborted, true);
   assert.ok(response.text().includes("event: ping"));
+});
+
+test("Copilot remembers /responses models for web search and builds Responses auth without Anthropic headers", async () => {
+  let fetches = 0;
+  const fetchImpl = async () => {
+    fetches++;
+    return new Response(JSON.stringify({ data: [
+      { id: "claude-ok", model_picker_enabled: true, supported_endpoints: ["/v1/messages"] },
+      { id: "gpt-6-luna", model_picker_enabled: true, supported_endpoints: ["/responses", "ws:/responses"] },
+      { id: "gpt-6-off", model_picker_enabled: true, policy: { state: "disabled" }, supported_endpoints: ["/responses"] }
+    ] }));
+  };
+  await discoverCopilotModels({ loadAuth, fetchImpl });
+  assert.deepEqual(await listCopilotResponsesModels({ loadAuth, fetchImpl }), ["gpt-6-luna"]);
+  assert.equal(fetches, 1);
+  const responsesAuth = await loadCopilotResponsesAuth({ loadAuth });
+  assert.deepEqual([responsesAuth.kind, responsesAuth.token, responsesAuth.baseUrl], ["copilot", auth.token, auth.baseUrl]);
+  assert.equal(responsesAuth.headers.Accept, "text/event-stream");
+  assert.equal(responsesAuth.headers["X-Initiator"], "agent");
+  assert.ok(responsesAuth.headers["Copilot-Integration-Id"]);
+  for (const name of ["Authorization", "Content-Type", "anthropic-version", "anthropic-dangerous-direct-browser-access"]) assert.equal(responsesAuth.headers[name], undefined);
 });

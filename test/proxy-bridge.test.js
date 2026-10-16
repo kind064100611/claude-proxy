@@ -267,3 +267,94 @@ for (const platform of ["mac", "windows"]) {
     }
   });
 }
+
+for (const platform of ["mac", "windows"]) {
+  test(`${platform} answers built-in web search with search blocks and cancels it on disconnect`, { timeout: 5000 }, async () => {
+    const filename = path.resolve(platform, "proxy.js");
+    const nativeRequire = createRequire(filename);
+    const searches = [];
+    const forwarded = [];
+    let hang = false;
+    let aborted = 0;
+    let route;
+    const content = [{ type: "server_tool_use", id: "srvtoolu_ws_1", name: "web_search", input: { query: "q" } },
+      { type: "web_search_tool_result", tool_use_id: "srvtoolu_ws_1", content: [{ type: "web_search_result", url: "https://nodejs.org/", title: "Node.js" }] },
+      { type: "text", text: "Summary." }];
+    const context = {
+      require: (name) => name === "../lib/web-search" ? { ...nativeRequire(name), runWebSearch: async (body, search, options) => {
+        searches.push({ body, search, copilot: options.copilot });
+        if (hang) {
+          await new Promise((resolve, reject) => {
+            options.control.abort = (message, status) => { aborted++; reject(Object.assign(new Error(message), { status })); };
+          });
+        }
+        return { content, searches: 1, hits: 1, model: options.copilot ? "gpt-6-luna" : body.model, authKind: options.copilot ? "copilot" : "codex", capped: false, usage: null };
+      } }
+        : name === "../lib/openai-responses" ? { ...responses, requestResponses: async () => { throw new Error("conversation upstream must not be called"); } }
+        : name === "../lib/github-copilot" ? { ...nativeRequire(name), forwardClaudeRequest: async (body, request, response) => {
+          forwarded.push(body);
+          response.end(JSON.stringify({ type: "message", model: body.model, content: [] }));
+        } }
+        : name === "../lib/online-summary" ? { ...nativeRequire(name),
+          createOnlineSummary: () => ({ getStatus: () => ({ projectMemory: false }), prepare: async (body) => ({ body, stats: {} }), cleanup: () => 0 }) }
+        : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [] }) }
+        : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) }
+        : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) }
+        : name === "http" ? { createServer: (handler) => { route = handler; return {}; } } : nativeRequire(name),
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
+      setTimeout, clearTimeout, setInterval, clearInterval
+    };
+    vm.runInNewContext(fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0], context, { filename });
+    const send = async (payload, url = "/v1/messages?beta=true", { close = false } = {}) => {
+      const request = new EventEmitter();
+      Object.assign(request, { method: "POST", url, headers: {} });
+      const response = new EventEmitter();
+      let output = "";
+      Object.assign(response, { setHeader() {}, writeHead(status, headers) { response.status = status; response.headers = headers; response.headersSent = true; },
+        write: (data) => { output += data; if (close && data.includes("waiting for upstream")) setImmediate(() => { response.destroyed = true; response.emit("close"); }); return true; } });
+      const done = new Promise((resolve) => {
+        response.end = (data) => { if (data) output += data; response.writableEnded = true; response.writableFinished = true; response.emit("finish"); resolve(output); };
+        if (close) response.once("close", () => setImmediate(() => resolve(output)));
+      });
+      await route(request, response);
+      request.emit("data", Buffer.from(JSON.stringify(payload)));
+      request.emit("end");
+      return { body: await done, response };
+    };
+    const payload = (model, stream, tool = {}) => ({ model, stream, max_tokens: 1024, system: [{ type: "text", text: "Search once." }],
+      messages: [{ role: "user", content: "Perform a web search for the query: q" }],
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8, ...tool }], tool_choice: { type: "auto" }, thinking: { type: "disabled" } });
+
+    const streamed = await send(payload("claude-opus-5.5", true));
+    assert.equal(streamed.response.headers["Content-Type"], "text/event-stream");
+    const events = streamed.body.split("\n\n").filter((frame) => frame.startsWith("event:")).map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+    assert.deepEqual(events.map((event) => event.type), ["message_start", "content_block_start", "content_block_delta", "content_block_stop",
+      "content_block_start", "content_block_stop", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]);
+    assert.deepEqual(events[4].content_block, content[1]);
+    assert.equal(events[9].delta.stop_reason, "end_turn");
+    assert.equal(searches[0].copilot, true);
+    assert.equal(searches[0].body.tools, undefined);
+    assert.equal(searches[0].body.messages.at(-1).content, "Perform a web search for the query: q");
+    assert.equal(forwarded.length, 0);
+
+    const collected = JSON.parse((await send(payload("claude-gateway/gpt-6.1-sol[1m]", false))).body);
+    assert.deepEqual(collected.content, content);
+    assert.equal(collected.stop_reason, "end_turn");
+    assert.deepEqual([searches[1].copilot, searches[1].body.model], [false, "gpt-6.1-sol"]);
+
+    const rejected = await send(payload("gpt-6.1-sol", true, { blocked_domains: ["example.com"] }));
+    assert.equal(rejected.response.status, 400);
+    assert.match(JSON.parse(rejected.body).error.message, /blocked_domains/);
+    assert.equal(searches.length, 2);
+
+    // Token counting keeps its native route and never runs a real search.
+    await send(payload("claude-opus-5.5", false), "/v1/messages/count_tokens");
+    assert.equal(forwarded.length, 1);
+    assert.equal(searches.length, 2);
+
+    hang = true;
+    await send(payload("gpt-6.1-sol", true), "/v1/messages?beta=true", { close: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(aborted, 1);
+  });
+}

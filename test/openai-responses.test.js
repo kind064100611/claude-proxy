@@ -255,3 +255,28 @@ test("stream failure events keep the upstream reason and code", async () => {
     else process.env.OPENAI_API_KEY = previous;
   }
 });
+
+test("web search hooks rewrite the native body, see every event, and Copilot auth supplies its endpoint", async () => {
+  const events = [
+    { type: "response.output_item.added", output_index: 0, item: { type: "web_search_call", id: "ws_1", status: "in_progress" } },
+    { type: "response.completed", response: { ...finalResponse, output: [] } }
+  ];
+  const seen = [];
+  let request;
+  const assembled = await requestResponses({ model: "gpt-6-luna", messages: [{ role: "user", content: "q" }], stream: false }, {
+    remember: false,
+    loadAuth: async () => ({ kind: "copilot", token: "test-only", baseUrl: "https://copilot.example", headers: { "Copilot-Integration-Id": "vscode-chat" } }),
+    adjustPayload: (payload, auth) => { payload.stream = true; payload.tools = [{ type: "web_search" }]; payload.marker = auth.kind; },
+    onEvent: (event) => seen.push(event.type),
+    fetchImpl: async (url, options) => {
+      request = { url, headers: options.headers, body: JSON.parse(options.body) };
+      return { ok: true, body: packets(frames(events)) };
+    }
+  });
+  assert.equal(request.url, "https://copilot.example/responses");
+  assert.equal(request.headers.Authorization, "Bearer test-only");
+  assert.equal(request.headers["Copilot-Integration-Id"], "vscode-chat");
+  assert.deepEqual([request.body.stream, request.body.tools, request.body.marker], [true, [{ type: "web_search" }], "copilot"]);
+  assert.deepEqual(seen, ["response.output_item.added", "response.completed"]);
+  assert.equal(assembled.model, "gpt-6-luna");
+});

@@ -6,6 +6,7 @@ const { isResponsesModel, getPromptCacheKey, getResponsesReasoning, requestRespo
 const { selectModel, toGatewayModels } = require("../lib/model-routing");
 const { createModelDiscovery } = require("../lib/model-discovery");
 const { isClaudeModel, forwardClaudeRequest } = require("../lib/github-copilot");
+const { parseWebSearchRequest, runWebSearch, toAnthropicMessage, toAnthropicEvents } = require("../lib/web-search");
 const { createOnlineSummary, createSummarySettings } = require("../lib/online-summary");
 const { createSummaryModel, DEFAULT_PROMPT: DEFAULT_SUMMARY_PROMPT } = require("../lib/summary-model");
 const { defaultStore: credentialStore } = require("../lib/credential-store");
@@ -898,6 +899,58 @@ function streamToClient(openaiBody, model, primaryModel, requestId, clientRes) {
     });
 }
 
+// Claude Code 内置 WebSearch 的独立请求：执行上游原生搜索，按客户端要求以 JSON 或 SSE 返回搜索块。
+// 不支持的选项在请求上游前拒绝；SSE 先打开并保持 keepalive，客户端断开时取消上游。
+async function answerWebSearch(anthropicBody, search, model, requestId, res) {
+  if (search.error) {
+    logWarn(requestId, "Web search request rejected", { model });
+    sendJsonError(res, 400, search.error);
+    return;
+  }
+  const copilot = isClaudeModel(model);
+  if (!copilot && !isResponsesModel(model)) {
+    sendJsonError(res, 400, `Built-in web search is not supported for model ${model || "(missing)"}`);
+    return;
+  }
+  const openaiBody = convertAnthropicToOpenAI({ ...anthropicBody, tools: [] }, requestId);
+  const control = {};
+  let stopKeepAlive = () => {};
+  let finished = false;
+  const onClose = () => {
+    if (!finished && !res.writableFinished) control.abort?.("Client closed before web search finished", 499);
+  };
+  res.on("close", onClose);
+  try {
+    if (anthropicBody.stream) {
+      if (!(await openAnthropicStream(res, model, requestId))) return;
+      stopKeepAlive = startSseKeepAlive(res, requestId);
+    }
+    const result = await runWebSearch(openaiBody, search, { copilot, control,
+      onCacheUsage: (usage) => logEvent(requestId, "OpenAI prompt cache usage", usage) });
+    stopKeepAlive();
+    logEvent(requestId, "Web search completed", { model: result.model, auth_kind: result.authKind, searches: result.searches, results: result.hits, capped: result.capped });
+    const message = toAnthropicMessage(result, model);
+    if (!anthropicBody.stream) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(message));
+      return;
+    }
+    for (const [name, data] of toAnthropicEvents(message)) await writeSseEvent(res, name, data);
+    await endWithBackpressure(res);
+  } catch (error) {
+    stopKeepAlive();
+    if (res.destroyed || res.writableEnded) return;
+    logError(requestId, "Web search failed", { status: error.status || 502, message: error.message });
+    if (!res.headersSent) sendJsonError(res, error.status || 502, error.message);
+    else await writeSseEvent(res, "error", { type: "error", error: { type: getErrorType(error.status || 502), message: error.message } })
+      .then(() => endWithBackpressure(res)).catch(() => {});
+  } finally {
+    finished = true;
+    stopKeepAlive();
+    res.off("close", onClose);
+  }
+}
+
 const macosService = createMacosService({ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy });
 const projectMemoryInstaller = createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() });
 const authRouter = createAuthRouter({
@@ -990,6 +1043,12 @@ const server = http.createServer(async (req, res) => {
         const model = configuredModel?.replace(/\[1m\]$/i, "");
         anthropicBody.model = model;
 
+        // count_tokens 等只读子路径保持原有转发，不执行真实搜索。
+        const search = readOnly ? null : parseWebSearchRequest(anthropicBody);
+        if (search) {
+          await answerWebSearch(anthropicBody, search, model, requestId, res);
+          return;
+        }
         if (isClaudeModel(model)) {
           logEvent(requestId, "Copilot Claude request started", { model, stream: isStream });
           try {

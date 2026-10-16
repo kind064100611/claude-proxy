@@ -15,6 +15,7 @@ A local gateway for Claude Code. Access GPT through ChatGPT / Codex device autho
 - [Installing Coding Discipline](#installing-coding-discipline)
 - [Model selection and API](#model-selection-and-api)
 - [Streaming, tools, images, and reasoning](#streaming-tools-images-and-reasoning)
+- [Built-in WebSearch](#built-in-websearch)
 - [Cache behavior](#cache-behavior)
 - [Online Summary](#online-summary)
 - [Environment variables](#environment-variables)
@@ -327,6 +328,22 @@ Use `/login` for login and configuration operations; these endpoints do not supp
 - **Reasoning:** GPT supports public reasoning summaries, not native Claude's full thinking / signature protocol. Literal `<think>` text in an answer is not misclassified as a GPT reasoning block. Copilot adapts adaptive thinking using catalog capabilities while preserving native signatures and compatibility fallbacks.
 
 The request-body limit is 32 MiB. OpenAI requests have a one-hour total timeout and are canceled after 90 seconds without data once upstream response headers have arrived. GPT SSE attempts a keepalive every 10 seconds. Copilot requests also have a one-hour total timeout, but do not use the same idle-timer behavior as OpenAI.
+
+## Built-in WebSearch
+
+Claude Code's built-in **WebSearch** tool sends its own request whose only tool is `web_search_20250305` (on the wire `tool_choice` is `auto`). The proxy recognizes that request, runs OpenAI's native Responses `web_search` upstream with the search required, and returns the real calls and sources as `server_tool_use` / `web_search_tool_result` blocks (JSON or SSE) with `end_turn`. Claude Code then hands the titles and URLs to the main conversation. `count_tokens` subpaths are never searched.
+
+| Session model | Where the search runs |
+| --- | --- |
+| GPT (`claude-gateway/gpt-…`) | The same model and ChatGPT/Codex login (or `OPENAI_API_KEY`) |
+| Copilot Claude (`claude-…`) | The newest Luna in the Copilot catalog, on Copilot `/responses` with the same Copilot login. Copilot's Claude `/v1/messages` endpoint rejects server-side web search (`The use of the web search tool is not supported`), so only this one search step uses a GPT model; the conversation stays on Claude |
+
+- **Results:** Hits come only from the upstream `web_search_call` sources (http/https, de-duplicated); titles come from the upstream URL citations, otherwise the URL is shown. Nothing is extracted from answer text, and Anthropic `encrypted_content` is never fabricated. The upstream's short summary is passed through as text.
+- **Zero hits vs. failure:** A completed search with an empty source list returns an empty result ("No links found."). A failed call or a call without a source list returns a `web_search_tool_result_error`. An upstream answer with no search call at all, authentication, rate-limit and network errors return an error instead of an empty result.
+- **Limits:** `allowed_domains` is enforced natively and accepts only plain domain names such as `example.com`. Non-empty `blocked_domains`, `user_location` or any other unknown option is rejected before calling upstream, because it cannot be enforced equivalently. `max_uses` is sent as `max_tool_calls` to Copilot; the ChatGPT/Codex endpoint rejects that parameter, so there the proxy aborts the upstream stream as soon as a search beyond `max_uses` starts and reports it as `max_uses_exceeded`. `search_profile: "fast"` is a latency hint and maps to `search_context_size: "low"`.
+- **Logs:** `Web search completed` records the model, auth kind, search and result counts, and whether the limit was hit; queries and source content are never logged.
+- **Tested endpoints:** the ChatGPT/Codex login and Copilot `/responses` were checked against the live services. `OPENAI_API_KEY` uses the public Responses API, which documents the same tool, but it has not been tested here.
+- A running proxy must be restarted to pick up this behavior.
 
 ## Cache behavior
 
