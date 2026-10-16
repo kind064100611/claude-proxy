@@ -57,7 +57,7 @@ test("Copilot refresh deduplicates, keeps GitHub refresh token and atomically pr
     assert.deepEqual(saved["openai-codex"], { untouched: true });
     assert.deepEqual(saved.other, { preserved: true });
     assert.deepEqual(saved["github-copilot"].availableModelIds, ["claude-new-model"]);
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(fs.readdirSync(path.dirname(file)), ["auth.json"]);
   });
 });

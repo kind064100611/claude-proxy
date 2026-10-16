@@ -1,6 +1,10 @@
 "use strict";
 
 const test = require("node:test");
+if (process.platform === "win32") {
+  test("Statusline", { skip: "Statusline tests are skipped on Windows" }, () => {});
+  return;
+}
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");

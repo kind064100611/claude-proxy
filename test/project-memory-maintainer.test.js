@@ -6,13 +6,18 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFile, execFileSync } = require("child_process");
 const { createProjectMemoryMaintainer } = require("../lib/project-memory-maintainer");
+const { createSetupProbe } = require("../lib/claude-probes");
 
 const pcm = path.resolve(__dirname, "../project-code-memory/scripts/pcm.py");
 let python = null;
-try {
-  python = execFileSync("python3", ["-I", "-c", "import sys; assert sys.version_info >= (3, 9); print(sys.executable)"], { encoding: "utf8" }).trim();
-} catch (_) { /* Python 3.9+ unavailable: the suite is skipped. */ }
-const skip = !python && "Python 3.9+ is required";
+test.before(async () => {
+  const dependencies = await createSetupProbe({ includePython: true })();
+  if (dependencies.python) {
+    const { file, launcher } = dependencies.python;
+    python = execFileSync(file, [...(launcher ? ["-3"] : []), "-I", "-B", "-c", "import sys; print(sys.executable)"],
+      { encoding: "utf8", timeout: 1800, windowsHide: true }).trim();
+  }
+});
 const sha = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
 function repository(t) {
@@ -49,7 +54,8 @@ function maintainer(reply, options = {}) {
   return { ...instance, calls, events, warnings };
 }
 
-test("a stale record is refreshed under its id with gateway provenance and current fingerprints", { skip }, async (t) => {
+test("a stale record is refreshed under its id with gateway provenance and current fingerprints", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   fs.appendFileSync(path.join(root, "src/auth.js"), "// changed\n");
@@ -71,7 +77,8 @@ test("a stale record is refreshed under its id with gateway provenance and curre
   assert.deepEqual(Object.keys(m.events[0]).sort(), ["deleted", "model", "ms", "project", "rejected", "saved"]);
 });
 
-test("a learned topic becomes a new record and an obsolete record is deleted", { skip }, async (t) => {
+test("a learned topic becomes a new record and an obsolete record is deleted", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "old-topic", paths: ["src/store.js"], keywords: ["legacy"] });
   const m = maintainer({ save: [draft({ id: "session-store", paths: ["src/store.js"], symbols: ["SessionStore"] })], delete: ["old-topic"] });
@@ -84,7 +91,8 @@ test("a learned topic becomes a new record and an obsolete record is deleted", {
   assert.match(m.calls[0].input, /SessionStore creates sessions/);
 });
 
-test("a read-only analysis refreshes the valid record that cites its learned files", { skip }, async (t) => {
+test("a read-only analysis refreshes the valid record that cites its learned files", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   seed(root, { id: "store-topic", paths: ["src/store.js"], keywords: ["store"] });
@@ -99,7 +107,8 @@ test("a read-only analysis refreshes the valid record that cites its learned fil
   assert.match(m.calls[0].input, /Other existing record ids \(never reuse\): store-topic\n/);
 });
 
-test("a stale record the model neither refreshes nor deletes is deleted, and valid unrelated records stay", { skip }, async (t) => {
+test("a stale record the model neither refreshes nor deletes is deleted, and valid unrelated records stay", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "store-topic", paths: ["src/store.js"], keywords: ["store"] });
   seed(root, { id: "auth-topic", paths: ["src/auth.js"], keywords: ["auth"] });
@@ -111,7 +120,8 @@ test("a stale record the model neither refreshes nor deletes is deleted, and val
   assert.notEqual(record(root, "auth-topic"), null);
 });
 
-test("hallucinated symbols, uncited or outside paths, reused ids and excess new records are rejected", { skip }, async (t) => {
+test("hallucinated symbols, uncited or outside paths, reused ids and excess new records are rejected", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   seed(root, { id: "unrelated", paths: ["src/store.js"], keywords: ["store"] });
@@ -134,7 +144,8 @@ test("hallucinated symbols, uncited or outside paths, reused ids and excess new 
   assert.doesNotMatch(m.calls[0].input, /outside\.js|index\.tsv/);
 });
 
-test("roots without an owned real cache directory are rejected before any model call", { skip }, async (t) => {
+test("roots without an owned real cache directory are rejected before any model call", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   const m = maintainer({ save: [], delete: [] });
   assert.equal(await m.enqueue({ root, changed_paths: ["src/auth.js"] }), null);
@@ -153,7 +164,8 @@ test("roots without an owned real cache directory are rejected before any model 
   assert.ok(!JSON.stringify(m.warnings).includes(root));
 });
 
-test("model failure or invalid output writes nothing, and .gitignore is never edited", { skip }, async (t) => {
+test("model failure or invalid output writes nothing, and .gitignore is never edited", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\n");
@@ -170,7 +182,8 @@ test("model failure or invalid output writes nothing, and .gitignore is never ed
   assert.equal(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), "node_modules/\n");
 });
 
-test("a file changed after the model saw it is not fingerprinted, and nothing to maintain skips the model", { skip }, async (t) => {
+test("a file changed after the model saw it is not fingerprinted, and nothing to maintain skips the model", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   fs.appendFileSync(path.join(root, "src/auth.js"), "// changed\n");
@@ -190,7 +203,8 @@ test("a file changed after the model saw it is not fingerprinted, and nothing to
   assert.equal(idle.calls.length, 0);
 });
 
-test("jobs for one root run one at a time with isolated, shell-free Python", { skip }, async (t) => {
+test("jobs for one root run one at a time with isolated, shell-free Python", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   fs.appendFileSync(path.join(root, "src/auth.js"), "// changed\n");
@@ -224,7 +238,8 @@ test("jobs for one root run one at a time with isolated, shell-free Python", { s
   assert.equal(fs.existsSync(path.join(path.dirname(pcm), "__pycache__")), false);
 });
 
-test("a file the size of proxy.js can be cited, while files over 96 KB cannot", { skip }, async (t) => {
+test("a file the size of proxy.js can be cited, while files over 96 KB cannot", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
   const line = "// padding to grow the file beyond the old 64 KB evidence limit\n";

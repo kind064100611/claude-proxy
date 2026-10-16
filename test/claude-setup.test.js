@@ -80,7 +80,8 @@ for (const value of ["invalid-private-content", "[]", "null", '{"env":[]}', '{"e
 test("rejects symlink, directory, readonly targets and linked private backup roots", async (t) => {
   const f = fixture(t);
   const original = path.join(f.root, "original"); fs.writeFileSync(original, "{}");
-  fs.symlinkSync(original, f.settingsFile);
+  // A directory Junction also exercises the unsafe-settings path without Windows symlink privileges.
+  fs.symlinkSync(process.platform === "win32" ? f.root : original, f.settingsFile, process.platform === "win32" ? "junction" : "file");
   await assert.rejects(f.setup.configureCli(), /Settings/);
   fs.unlinkSync(f.settingsFile); fs.mkdirSync(f.settingsFile);
   await assert.rejects(f.setup.configureCli(), /Settings/);
@@ -90,7 +91,7 @@ test("rejects symlink, directory, readonly targets and linked private backup roo
     await assert.rejects(f.setup.configureCli(), /Settings/);
     fs.chmodSync(f.settingsFile, 0o600);
   }
-  fs.symlinkSync(f.root, path.join(f.root, "claude-proxy"), "dir");
+  fs.symlinkSync(f.root, path.join(f.root, "claude-proxy"), process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(f.setup.configureCli(), /Settings/);
   assert.equal(fs.readFileSync(original, "utf8"), "{}");
 });
@@ -289,7 +290,7 @@ test("version probes reject old Bash/jq/Node without shell or automatic installa
     ["3.2", "1.6", "17.0", [true, true, false]],
     ["3.2", "2.0", "18.0", [true, true, true]]
   ]) {
-    const probe = createSetupProbe({ env: { PATH: "/fake" }, home: "/fake-home", node: "/fake-node",
+    const probe = createSetupProbe({ platform: "darwin", env: { PATH: "/fake" }, home: "/fake-home", node: "/fake-node",
       fsImpl: { statSync: () => ({ isFile: () => true }) }, execFileImpl(file, args, options, done) {
         assert.deepEqual(args, ["--version"]);
         assert.equal(options.shell, false);
@@ -320,7 +321,7 @@ test("missing CLI/dependencies and invalid bundles gate statusline without deplo
 
 test("probe uses bounded shell-free fixed arguments, common install locations and sanitized outputs", async () => {
   const calls = [];
-  const probe = createSetupProbe({ env: { PATH: "/limited", BASH_ENV: "private-hook", NODE_OPTIONS: "private-options" }, home: "/home/test", node: "/node",
+  const probe = createSetupProbe({ platform: "darwin", env: { PATH: "/limited", BASH_ENV: "private-hook", NODE_OPTIONS: "private-options" }, home: "/home/test", node: "/node",
     fsImpl: { statSync: () => ({ isFile: () => true }) }, execFileImpl(file, args, options, done) {
       calls.push({ file, args, options });
       done(null, file.endsWith("claude") ? "2.1.296 (Claude Code)" : file.endsWith("bash") ? "GNU bash, version 3.2.57" : file.endsWith("jq") ? "jq-1.6" : "v22.1.0");
