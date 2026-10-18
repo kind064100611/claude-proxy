@@ -278,7 +278,7 @@ curl http://127.0.0.1:8082/v1/models
 curl http://127.0.0.1:8082/features
 ```
 
-The catalog returns `claude-gateway/<model ID>`. When `capabilities.limits.max_context_window_tokens` is a valid positive integer, it decides the `[1m]` extended-context marker: only limits of at least 1,000,000 tokens get the suffix, so Copilot's `claude-haiku-4.5` at 200K does not. Without a valid catalog limit, the existing GPT Sol/Luna/Terra and Claude family rules remain in effect. The suffix is never duplicated and is removed before forwarding. This marker is not an upstream expansion or a guarantee of the account's actual context allowance; upstream capabilities depend on the account catalog and request results.
+The catalog returns GPT models as `anthropic/<model ID>` and Claude models under their plain ID. Claude Code's `/model` picker lists only gateway IDs that contain `claude` or `anthropic`, and it applies `CLAUDE_CODE_MAX_CONTEXT_TOKENS` only to IDs that do not start with `claude-`; the `anthropic/` prefix satisfies both. Requests that still use the older `claude-gateway/` spelling are accepted. When `capabilities.limits.max_context_window_tokens` is a valid positive integer, it decides the `[1m]` extended-context marker on Claude IDs: only limits of at least 1,000,000 tokens get the suffix, so Copilot's `claude-haiku-4.5` at 200K does not. GPT IDs never get it, because on them `[1m]` would override `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Without a valid catalog limit, the existing GPT Sol/Luna/Terra and Claude family rules remain in effect. The suffix is never duplicated and is removed before forwarding. This marker is not an upstream expansion or a guarantee of the account's actual context allowance; upstream capabilities depend on the account catalog and request results.
 
 Requests may use the full gateway ID from the catalog or an explicit raw GPT / Claude model ID. CLI aliases such as `sonnet`, `opus`, `haiku`, and `default` use the model configured in settings. Send an explicit model ID if no default is configured. Other model types return HTTP 400 instead of being routed to the wrong provider.
 
@@ -289,14 +289,14 @@ curl http://127.0.0.1:8082/v1/messages \
   -H 'Content-Type: application/json' \
   -H 'anthropic-version: 2023-06-01' \
   -d '{
-    "model": "claude-gateway/gpt-<available-id>",
+    "model": "anthropic/gpt-<available-id>",
     "max_tokens": 256,
     "stream": false,
     "messages": [{"role":"user","content":"Explain the purpose of this gateway in one sentence."}]
   }'
 ```
 
-For Claude, replace `model` with a `claude-gateway/claude-...` entry from the catalog. To stream, use the same body with `stream` set to `true` and add `-N` to curl. In Windows PowerShell, use `curl.exe` and save the body to a JSON file you create yourself to avoid shell quoting differences.
+For Claude, replace `model` with a `claude-...` entry from the catalog. To stream, use the same body with `stream` set to `true` and add `-N` to curl. In Windows PowerShell, use `curl.exe` and save the body to a JSON file you create yourself to avoid shell quoting differences.
 
 Main endpoints:
 
@@ -336,7 +336,7 @@ Claude Code's built-in **WebSearch** tool sends its own request whose only tool 
 
 | Session model | Where the search runs |
 | --- | --- |
-| GPT (`claude-gateway/gpt-…`) | The same model and ChatGPT/Codex login (or `OPENAI_API_KEY`) |
+| GPT (`anthropic/gpt-…`) | The same model and ChatGPT/Codex login (or `OPENAI_API_KEY`) |
 | Copilot Claude (`claude-…`) | The newest Luna in the Copilot catalog, on Copilot `/responses` with the same Copilot login. Copilot's Claude `/v1/messages` endpoint rejects server-side web search (`The use of the web search tool is not supported`), so only this one search step uses a GPT model; the conversation stays on Claude |
 
 - **Results:** Hits come only from the upstream `web_search_call` sources (http/https, de-duplicated); titles come from the upstream URL citations, otherwise the URL is shown. Nothing is extracted from answer text, and Anthropic `encrypted_content` is never fabricated. The upstream's short summary is passed through as text.

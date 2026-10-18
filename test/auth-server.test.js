@@ -399,7 +399,7 @@ test("HTTP setup rejects absent credentials, returns safe status and concurrentl
     assert.ok(!result.text.includes("sk-placeholder"));
   }
   const saved = JSON.parse(fs.readFileSync(path.join(configRoot, "settings.json"), "utf8"));
-  assert.equal(saved.env.ANTHROPIC_MODEL, "claude-gateway/gpt-test");
+  assert.equal(saved.env.ANTHROPIC_MODEL, "anthropic/gpt-test");
   assert.equal(saved.statusLine.command, "local-statusline");
 });
 

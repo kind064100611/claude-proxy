@@ -55,7 +55,7 @@ async function runCli({ requestResponses, searchResponses = async () => { throw 
       const child = promisify(execFile)("claude", [
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         ...(followUpPrompts.length ? [] : ["--no-session-persistence"]),
-        "--model", "claude-gateway/gpt-5.4", "--debug-file", path.join(directory, "debug.log"), "--output-format", "json", ...promptArgs
+        "--model", "anthropic/gpt-5.4", "--debug-file", path.join(directory, "debug.log"), "--output-format", "json", ...promptArgs
       ], { cwd: directory, env, timeout: 90000, maxBuffer: 1024 * 1024 });
       child.child.stdin.end();
       const { stdout } = await child;
@@ -95,7 +95,7 @@ test("installed Claude CLI sends selected GPT and gateway serves discovery URL",
   assert.equal(result.is_error, false);
   assert.equal(result.result, "gateway-smoke-ok");
   assert.ok(observed.includes("gpt-5.4"));
-  assert.ok(models.data.some((entry) => entry.id === "claude-gateway/gpt-5.4"));
+  assert.ok(models.data.some((entry) => entry.id === "anthropic/gpt-5.4"));
 });
 
 // The built-in tool sends its own web_search_20250305 request (tool_choice auto on the wire); its links must reach
@@ -153,7 +153,8 @@ for (const mode of ["threshold", "context-error", "oversized-summary"]) {
     const tooLong = () => upstreamError({ code: "context_length_exceeded", type: "invalid_request_error",
       message: "Your input exceeds the context window of this model." });
     const { result } = await runCli({
-      envOverrides: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: mode === "context-error" ? "95" : "10" },
+      // Claude Code compacts an anthropic/gpt-* model at its threshold only when this window is declared.
+      envOverrides: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: mode === "context-error" ? "95" : "10", CLAUDE_CODE_MAX_CONTEXT_TOKENS: "200000" },
       requestResponses: async (body, options) => {
         const summary = body.messages.some((message) =>
           typeof message.content === "string" && message.content.includes("Your task is to create a detailed summary of the conversation so far"));
@@ -207,8 +208,8 @@ for (const mode of ["threshold", "context-error", "oversized-summary"]) {
 // A local Anthropic endpoint serves the catalog and stands in for the gateway, so every turn stays offline.
 test("launcher applies a fixed GPT window across GPT/Claude switching; compaction runs on the next turn", { skip, timeout: 200000 }, async () => {
   const summaryMarker = "Your task is to create a detailed summary of the conversation so far";
-  const catalog = { object: "list", data: [{ id: "claude-gateway/gpt-6.1-sol", context_window: 872000 },
-    { id: "claude-gateway/claude-opus-5.5", context_window: 1000000 }] };
+  const catalog = { object: "list", data: [{ id: "anthropic/gpt-6.1-sol", context_window: 872000 },
+    { id: "claude-opus-5.5", context_window: 1000000 }] };
   let inputTokens = 1000;
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -254,7 +255,7 @@ test("launcher applies a fixed GPT window across GPT/Claude switching; compactio
       if (key === "CLAUDECODE" || key === "CLAUDE_CODE_MAX_CONTEXT_TOKENS" || key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_CODE_USE_")) delete env[key];
     }
     Object.assign(env, { ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, ANTHROPIC_API_KEY: "test-only",
-      ANTHROPIC_MODEL: "claude-gateway/gpt-6.1-sol[1m]" });
+      ANTHROPIC_MODEL: "anthropic/gpt-6.1-sol[1m]" });
     const child = require("child_process").spawn(process.execPath, [path.resolve("lib/claude-launch.js"), "-p", "--input-format", "stream-json",
       "--output-format", "stream-json", "--verbose", "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
       "--no-session-persistence", "--tools", ""], { cwd: directory, env });

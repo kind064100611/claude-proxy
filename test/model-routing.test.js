@@ -6,9 +6,11 @@ test("CLI explicit model and discovery aliases override settings", () => {
   const fallback = "gpt-5.4";
   for (const model of ["gpt-5.4", "openai/gpt-5", "claude-sonnet-4"]) {
     assert.equal(selectModel(model, fallback), model);
+    assert.equal(selectModel("anthropic/" + model, fallback), model);
+    // Spelling saved before the anthropic/ rename still routes.
     assert.equal(selectModel("claude-gateway/" + model, fallback), model);
   }
-  assert.equal(selectModel("claude-gateway/" + fallback, "gpt-5"), fallback);
+  assert.equal(selectModel("anthropic/" + fallback, "gpt-5"), fallback);
   assert.equal(selectModel("claude-sonnet-5.5", fallback), "claude-sonnet-5.5");
   assert.equal(selectModel("claude-gateway/claude-opus-5.5", fallback), "claude-opus-5.5");
   for (const alias of [undefined, "", "sonnet", "opus", "haiku"]) assert.equal(selectModel(alias, fallback), fallback);
@@ -18,7 +20,7 @@ test("unknown capacity is not upgraded to 1M from a model-family name", () => {
   for (const id of ["gpt-6.1-sol", "gpt-6-luna", "openai/gpt-6-terra", "claude-sonnet-5.5", "claude-haiku-4.5", "unsupported-model"]) {
     const original = { data: [{ id }] };
     const entry = toGatewayModels(original).data[0];
-    assert.equal(entry.id, "claude-gateway/" + id);
+    assert.equal(entry.id, id.startsWith("claude-") ? id : "anthropic/" + id);
     assert.equal(entry.display_name, id);
     assert.equal(selectModel(entry.id, "unused"), id);
     assert.equal(original.data[0].id, id);
@@ -53,7 +55,7 @@ test("largest declared capacity wins across every metadata field without mutatin
 
 test("an explicit upstream 1M ID stays intact when limits are unavailable", () => {
   const entry = toGatewayModels({ data: [{ id: "gpt-6-luna[1m]" }] }).data[0];
-  assert.equal(entry.id, "claude-gateway/gpt-6-luna[1m]");
+  assert.equal(entry.id, "anthropic/gpt-6-luna[1m]");
 });
 
 test("discovery list passes Claude filter while displaying original IDs", () => {
@@ -68,9 +70,13 @@ test("discovery list passes Claude filter while displaying original IDs", () => 
 
 test("catalog limits override family names and stale 1M suffixes without mutation", () => {
   const model = (id, tokens) => ({ id, capabilities: { limits: { max_context_window_tokens: tokens } } });
-  const original = { data: [model("gpt-6.1-sol[1m]", 500000), model("claude-haiku-4.5", 200000), model("gpt-6-luna", 1000000)] };
+  const original = { data: [model("gpt-6.1-sol[1m]", 500000), model("claude-haiku-4.5", 200000), model("gpt-6-luna", 1000000),
+    model("claude-haiku-5.5", 1000000)] };
   const entries = toGatewayModels(original).data;
-  assert.deepEqual(entries.map((entry) => entry.display_name), ["gpt-6.1-sol", "claude-haiku-4.5", "gpt-6-luna"]);
+  assert.deepEqual(entries.map((entry) => entry.display_name), ["gpt-6.1-sol", "claude-haiku-4.5", "gpt-6-luna", "claude-haiku-5.5"]);
+  // Only a declared 1M Claude limit gets [1m]; GPT keeps its plain ID so CLAUDE_CODE_MAX_CONTEXT_TOKENS applies.
+  assert.deepEqual(entries.map((entry) => entry.id),
+    ["anthropic/gpt-6.1-sol", "claude-haiku-4.5", "anthropic/gpt-6-luna", "claude-haiku-5.5[1m]"]);
   assert.equal(entries[0].capabilities.limits.max_context_window_tokens, 500000);
   assert.equal(entries[0].context_window, 500000);
   assert.equal(entries[0].runtime.max_input_tokens, 500000);

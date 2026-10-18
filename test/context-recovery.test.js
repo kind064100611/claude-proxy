@@ -43,7 +43,7 @@ async function proxy(platform, callback) {
 
 for (const platform of ["mac", "windows"]) {
   test(`${platform} count_tokens returns a JSON estimate without generation, replay or web search`, () => proxy(platform, async (url, calls) => {
-    const body = { model: "claude-gateway/gpt-6.1-sol", stream: true, max_tokens: 64000,
+    const body = { model: "anthropic/gpt-6.1-sol", stream: true, max_tokens: 64000,
       system: "system", tools: [{ name: "WebSearch", input_schema: { type: "object" } }],
       messages: [{ role: "user", content: [{ type: "text", text: "UTF-8: 中文 🦀" }] }] };
     const before = JSON.stringify(body);

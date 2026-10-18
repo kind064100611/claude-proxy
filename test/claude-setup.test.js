@@ -46,7 +46,7 @@ test("merge preserves unrelated settings, backs up original BOM bytes privately 
   const original = Buffer.from("﻿" + JSON.stringify(unrelated, null, 4) + "\n");
   fs.writeFileSync(f.settingsFile, original);
   const result = await f.setup.configureCli();
-  assert.equal(result.model, "claude-gateway/gpt-test");
+  assert.equal(result.model, "anthropic/gpt-test");
   const saved = f.read();
   for (const key of ["hooks", "permissions", "enabledPlugins", "model", "statusLine"]) assert.deepEqual(saved[key], unrelated[key]);
   for (const key of ["OTHER", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]) assert.equal(saved.env[key], unrelated.env[key]);
@@ -148,7 +148,7 @@ for (const provider of ["openai-codex", "github-copilot", "environment"]) {
       getAvailableModels: async () => ({ data: [{ id: "unsupported-model" }, { id: "gpt-test" }, { id: "claude-opus-5-5" }] }) });
     f.write({ env: { ANTHROPIC_MODEL: "claude-gateway/vendor/stale" } });
     const result = await setup.configureCli();
-    assert.equal(result.model.replace(/\[1m\]$/, ""), `claude-gateway/${expected}`);
+    assert.equal(result.model.replace(/\[1m\]$/, ""), provider === "github-copilot" ? expected : `anthropic/${expected}`);
     assert.ok(!JSON.stringify(f.read()).includes("env-only-secret"));
     assert.equal(f.read().env.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
     assert.equal(f.read().env.ANTHROPIC_DEFAULT_HAIKU_MODEL, undefined);
@@ -159,7 +159,7 @@ test("preserves the latest available model choice including extended context gat
   const f = fixture(t);
   f.write({ env: { ANTHROPIC_MODEL: "claude-gateway/gpt-second" } });
   const setup = createClaudeSetup({ ...f.base, getAvailableModels: async () => ({ data: [{ id: "gpt-first" }, { id: "gpt-second" }] }) });
-  assert.equal((await setup.configureCli()).model, "claude-gateway/gpt-second");
+  assert.equal((await setup.configureCli()).model, "anthropic/gpt-second");
 });
 
 test("empty or failed catalogs and vanished credentials never write settings", async (t) => {

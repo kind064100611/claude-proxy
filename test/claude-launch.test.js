@@ -6,10 +6,10 @@ const { buildLaunch, main } = require("../lib/claude-launch");
 const { createSetupProbe } = require("../lib/claude-probes");
 
 const catalog = { data: [
-  { id: "claude-gateway/gpt-6.1-sol", context_window: 872000 },
-  { id: "claude-gateway/gpt-small", context_window: 400000 },
-  { id: "claude-gateway/claude-opus-4.8", context_window: 1000000 },
-  { id: "claude-gateway/claude-haiku-4.5", context_window: 200000 }
+  { id: "anthropic/gpt-6.1-sol", context_window: 872000 },
+  { id: "anthropic/gpt-small", context_window: 400000 },
+  { id: "claude-opus-4.8", context_window: 1000000 },
+  { id: "claude-haiku-4.5", context_window: 200000 }
 ] };
 
 test("a stale gateway GPT ID launches under its raw ID without injecting settings", () => {
@@ -20,9 +20,9 @@ test("a stale gateway GPT ID launches under its raw ID without injecting setting
 });
 
 test("--model wins over the environment, and a Claude start keeps a window for later raw GPT switches", () => {
-  for (const args of [["--model", "claude-opus-4.8"], ["--model=claude-gateway/claude-opus-4.8"]]) {
+  for (const args of [["--model", "claude-opus-4.8"], ["--model=claude-opus-4.8[1m]"]]) {
     const launch = buildLaunch(catalog, args, { ANTHROPIC_MODEL: "gpt-small" });
-    assert.deepEqual(launch.args, ["--model", "claude-gateway/claude-opus-4.8[1m]"]);
+    assert.deepEqual(launch.args, ["--model", "claude-opus-4.8[1m]"]);
     assert.equal(launch.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "400000");
   }
   assert.equal(buildLaunch(catalog, [], { ANTHROPIC_MODEL: "gpt-small" }).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "400000");
@@ -30,7 +30,7 @@ test("--model wins over the environment, and a Claude start keeps a window for l
 
 test("unknown models, caller limits and the prompt after -- remain untouched", () => {
   const args = ["--model", "opus", "--", "--settings", "prompt", "--model=gpt-small"];
-  const launch = buildLaunch({ data: [{ id: "claude-gateway/gpt-new" }] }, args, { KEEP: "1" });
+  const launch = buildLaunch({ data: [{ id: "anthropic/gpt-new" }] }, args, { KEEP: "1" });
   assert.deepEqual(launch.args, args);
   assert.deepEqual(launch.env, { KEEP: "1" });
   const selected = buildLaunch(catalog, ["--", "prompt"], { ANTHROPIC_MODEL: "gpt-small", CLAUDE_CODE_MAX_CONTEXT_TOKENS: "300000" });
@@ -108,7 +108,7 @@ test("model-looking values of other options are never rewritten as model flags",
       const args = [option, value, "-p", "hello"];
       const launch = buildLaunch(catalog, args, {});
       assert.deepEqual(launch.args, args);
-      const explicit = [...args, "--model", "claude-gateway/gpt-6.1-sol[1m]"];
+      const explicit = [...args, "--model", "anthropic/gpt-6.1-sol[1m]"];
       const selected = buildLaunch(catalog, explicit, {});
       assert.deepEqual(selected.args, [...args, "--model", "gpt-6.1-sol"]);
       assert.equal(selected.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "872000");

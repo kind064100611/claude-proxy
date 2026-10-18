@@ -84,10 +84,10 @@ for (const platform of ["mac", "windows"]) {
     await route({ method: "GET", url: "/v1/models?limit=1000" }, listResponse);
     const models = JSON.parse(listResponse.body).data;
     assert.ok(models.length > 0);
-    assert.ok(models.every((entry) => entry.id.startsWith("claude-gateway/")));
+    assert.ok(models.every((entry) => /^(?:claude-|anthropic\/gpt-)/.test(entry.id)));
     assert.ok(models.some((entry) => entry.display_name === "gpt-5.4"));
 
-    for (const model of ["claude-sonnet-5.5", "claude-gateway/claude-sonnet-5.5", "claude-gateway/claude-sonnet-5.5[1m]"]) {
+    for (const model of ["claude-sonnet-5.5", "claude-sonnet-5.5[1m]", "claude-gateway/claude-sonnet-5.5"]) {
       const request = new EventEmitter();
       request.method = "POST";
       request.url = "/v1/messages?beta=true";
@@ -337,7 +337,7 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(searches[0].body.messages.at(-1).content, "Perform a web search for the query: q");
     assert.equal(forwarded.length, 0);
 
-    const collected = JSON.parse((await send(payload("claude-gateway/gpt-6.1-sol[1m]", false))).body);
+    const collected = JSON.parse((await send(payload("anthropic/gpt-6.1-sol[1m]", false))).body);
     assert.deepEqual(collected.content, content);
     assert.equal(collected.stop_reason, "end_turn");
     assert.deepEqual([searches[1].copilot, searches[1].body.model], [false, "gpt-6.1-sol"]);

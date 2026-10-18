@@ -127,9 +127,9 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(memory.headers.get("access-control-allow-origin"), null);
     assert.deepEqual(memoryCalls, ["factory", true]);
     const models = await (await fetch(base + "/v1/models?limit=1000")).json();
-    assert.deepEqual(models.data.map((model) => model.id), ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test"]);
+    assert.deepEqual(models.data.map((model) => model.id), ["anthropic/gpt-test", "claude-sonnet-test"]);
     const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } };
-    for (const model of ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test"]) {
+    for (const model of ["anthropic/gpt-test", "claude-sonnet-test"]) {
       for (const stream of [false, true]) {
         const result = await fetch(base + "/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model, stream, max_tokens: 50, system: "instructions", messages: [{ role: "user", content: [{ type: "text", text: "look" }, image] }],
@@ -155,7 +155,7 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(disabledResult.replaced, false);
     assert.deepEqual(memoryCalls, ["factory", true, false]);
     const count = upstream.length;
-    for (const model of ["unknown-model", "claude-gateway/unsupported", "gpt-oss-20b"]) {
+    for (const model of ["unknown-model", "anthropic/unsupported", "gpt-oss-20b"]) {
       const result = await fetch(base + "/v1/messages", { method: "POST", body: JSON.stringify({ model, messages: [] }) });
       assert.equal(result.status, 400);
     }
@@ -165,7 +165,7 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(configured.status, 200);
     const saved = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
     assert.equal(saved.env.KEEP, "yes");
-    assert.equal(saved.env.ANTHROPIC_MODEL, "claude-gateway/gpt-test");
+    assert.equal(saved.env.ANTHROPIC_MODEL, "anthropic/gpt-test");
     assert.equal(saved.statusLine.command, "existing");
     const backups = path.join(configRoot, "claude-proxy", "settings-backups");
     assert.deepEqual(fs.readFileSync(path.join(backups, fs.readdirSync(backups)[0])), original);
