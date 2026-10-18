@@ -25,7 +25,7 @@ Before the first source-symbol/path search or source-content read:
 Make the memory query the first repository code-discovery operation. Run it before `rg`, `grep`, `find`, or other source/path discovery (except the count above), and before reading source files. Build a focused query from the user's domain terms plus any known paths, classes, methods, event names, or error codes; avoid generic filler words.
 
 ```bash
-python3 -I -B "<absolute-skill-dir>/scripts/pcm.py" query \
+python3 -I -B "<absolute-skill-dir>/scripts/query.py" \
   --root <primary-project-root> \
   --limit 1 \
   "<focused task terms, paths, and symbols>"
@@ -33,9 +33,9 @@ python3 -I -B "<absolute-skill-dir>/scripts/pcm.py" query \
 
 Use Python 3.9 or newer. On macOS, use `python3 -I -B`; on Windows, use `python -I -B` or `py -3 -I -B`. Resolve `<absolute-skill-dir>` to the installed `~/.claude/skills/project-code-memory` directory (or `skills/project-code-memory` under the actual `CLAUDE_CONFIG_DIR` root); quote the absolute script path if it contains spaces. Do not depend on the current working directory.
 
-Use `--limit 1` for a focused question or one flow; raise it to at most `3` only when the task genuinely spans independent topics. Add `--locate` for code changes and reviews: it returns current `path:line` matches for saved symbols. `query` initializes memory when absent, creating the target `projectCodeMemory/` cache, validates matching fingerprints, and prunes matched stale or malformed records.
+Use `--limit 1` for a focused question or one flow; raise it to at most `3` only when the task genuinely spans independent topics. Add `--locate` for code changes and reviews: it returns current `path:line` matches for saved symbols. The query initializes memory when absent, creating the target `projectCodeMemory/` cache, validates matching fingerprints, and prunes matched malformed records. Matched stale records are reported as `STALE` and kept for the gateway to refresh or delete. Always use `scripts/query.py`, not `pcm.py query`, which would delete stale records.
 
-Whether `projectCodeMemory/` is newly created or already exists, you must ensure the root `.gitignore` contains `/projectCodeMemory/`; append the rule if missing. Reuse the existing `pcm.py query` path (`_init_memory` → `ensure_ignored`), which checks and adds the rule on every query, including when the cache already exists. This does not override the small-project bypass above. Do not remove already tracked files from Git's index.
+Whether `projectCodeMemory/` is newly created or already exists, you must ensure the root `.gitignore` contains `/projectCodeMemory/`; append the rule if missing. Reuse the existing query path (`_init_memory` → `ensure_ignored`), which checks and adds the rule on every query, including when the cache already exists. This does not override the small-project bypass above. Do not remove already tracked files from Git's index.
 
 Query again only when discovery exposes a genuinely new symbol or subsystem that could match a different record. Do not loop over paraphrased queries.
 

@@ -5,14 +5,15 @@
     "commit": "7dc7b0dad137fa8e1e65af31143f4ead8109ca03"
   },
   "files": {
-    "SKILL.md": "f3fd4b69787643a945070d50c9caebff6016ff4ad44bb4dba1e404849bca6a09",
+    "SKILL.md": "d9736ee934f3fc108f2b318f8602d28180ba0904f81cde56975fd8c407b5f357",
     "README.md": "736533cee2afc95a136ef92bded42ee09144b0cf473bad7fcb09eb5d3aeea82e",
     "agents/openai.yaml": "467a29a9fcc9f32360ee4a12f7674aa7e70f3880bef642a84e2d3981cd031e21",
     "references/record-format.md": "ddf0e1bd40d95af333d866d768b96d24f912353bb154562aee8e305c966c49f3",
     "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+    "scripts/query.py": "c572e759430fbd65c89097bf095e6e158d076c4330a99b8a425ea452befe2db8",
     "tests/test_pcm.py": "c1b7ea400d2d5f5a8fc85bbb65057c10a9edc93f1f832b96951d3a39f5eabc06",
     "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
-    "SOURCE.md": "69c107ab022d4c4e35a1945be4771f31d0acb07a4b4c9b535014196403a060f2"
+    "SOURCE.md": "1fbc5bcd59dad79e959f8f8558850e942b5cfc2978b0158db078648179af88b3"
   },
   "upstreamFiles": {
     "SKILL.md": "781938de648faed7865d0e955ee798ef3ac07609c6d6b50d54299899180b9d4d",
@@ -24,6 +25,7 @@
   },
   "installFiles": [
     "scripts/pcm.py",
+    "scripts/query.py",
     "LICENSE",
     "SOURCE.md",
     "SKILL.md"
@@ -68,6 +70,16 @@
         "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
         "SOURCE.md": "5783eb1ddaefee00d08b93226958cd06dc9b441d82a4fa307515a5a61d3f2879",
         "manifest.json": "9c0227b8e825ac10f029157c7eecb304b401fd24f47e77bc5d5a5f1cfcdca760"
+      }
+    },
+    {
+      "commit": "47082d3",
+      "method": "query-only install (four files, before scripts/query.py)",
+      "files": {
+        "scripts/pcm.py": "122eb68123581592056b0c06b4569248f3a7bb326f866788c18afada13d24119",
+        "LICENSE": "14263c93ae4f6d0de58650ecd2732fba3b40695605b7ec5c765a069e714be862",
+        "SOURCE.md": "69c107ab022d4c4e35a1945be4771f31d0acb07a4b4c9b535014196403a060f2",
+        "SKILL.md": "f3fd4b69787643a945070d50c9caebff6016ff4ad44bb4dba1e404849bca6a09"
       }
     }
   ]

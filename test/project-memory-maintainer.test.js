@@ -9,6 +9,7 @@ const { createProjectMemoryMaintainer } = require("../lib/project-memory-maintai
 const { createSetupProbe } = require("../lib/claude-probes");
 
 const pcm = path.resolve(__dirname, "../project-code-memory/scripts/pcm.py");
+const query = path.resolve(__dirname, "../project-code-memory/scripts/query.py");
 let python = null;
 test.before(async () => {
   const dependencies = await createSetupProbe({ includePython: true })();
@@ -120,7 +121,28 @@ test("a stale record the model neither refreshes nor deletes is deleted, and val
   assert.notEqual(record(root, "auth-topic"), null);
 });
 
-test("hallucinated symbols, uncited or outside paths, reused ids and excess new records are rejected", async (t) => {
+test("the skill's query keeps a stale record for the gateway to refresh and still prunes malformed ones", async (t) => {
+  if (!python) return t.skip("Python 3.9+ is required");
+  const root = repository(t);
+  seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
+  seed(root, { id: "broken", paths: ["src/store.js"], keywords: ["auth"] });
+  fs.writeFileSync(path.join(root, "projectCodeMemory/records/broken.json"), "{not-json");
+  fs.appendFileSync(path.join(root, "src/auth.js"), "// changed\n");
+  const run = () => execFileSync(python, ["-I", "-B", query, "--root", root, "--limit", "1", "auth"], { encoding: "utf8" });
+  const output = run();
+  assert.match(output, /^STALE auth-flow src\/auth\.js:changed$/m);
+  assert.match(output, /^PRUNED broken$/m);
+  assert.doesNotMatch(output, /PRUNED auth-flow/);
+  assert.equal(record(root, "broken"), null);
+  assert.match(fs.readFileSync(path.join(root, "projectCodeMemory/index.tsv"), "utf8"), /^auth-flow\t/m);
+  assert.match(run(), /^STALE auth-flow/m);
+  assert.equal(fs.existsSync(path.join(path.dirname(query), "__pycache__")), false);
+  const m = maintainer({ save: [draft({ id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] })], delete: [] });
+  assert.equal((await m.enqueue({ root, changed_paths: [] })).saved, 1);
+  assert.match(run(), /^VALID auth-flow/m);
+});
+
+test("hallucinated symbols, uncited or outside paths, reused ids and excess new records are rejected, keeping the old record", async (t) => {
   if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);
   seed(root, { id: "auth-flow", paths: ["src/auth.js"], symbols: ["authenticate"] });
@@ -137,8 +159,9 @@ test("hallucinated symbols, uncited or outside paths, reused ids and excess new 
     draft({ id: "no-facts", paths: ["src/auth.js"], facts: [] })
   ], delete: ["unrelated"] });
   const result = await m.enqueue({ root, changed_paths: ["src/auth.js", "../outside.js", "projectCodeMemory/index.tsv"] });
-  assert.deepEqual([result.saved, result.deleted, result.rejected], [0, 1, 6]);
-  assert.equal(record(root, "auth-flow"), null);
+  assert.deepEqual([result.saved, result.deleted, result.rejected], [0, 0, 6]);
+  // 被拒的刷新稿不会让原记录被当作“未刷新的过期记录”删掉。
+  assert.equal(record(root, "auth-flow").sum, "Seeded topic");
   assert.equal(record(root, "unrelated").sum, "Seeded topic");
   assert.equal(record(root, "outside"), null);
   assert.doesNotMatch(m.calls[0].input, /outside\.js|index\.tsv/);

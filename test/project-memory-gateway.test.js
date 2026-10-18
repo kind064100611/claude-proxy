@@ -82,6 +82,13 @@ test("only a call in the last assistant message answered by the last user messag
   history.messages.push({ role: "assistant", content: [{ type: "text", text: "Anything else?" }] }, { role: "user", content: "no" });
   assert.deepEqual(createProjectMemoryGateway().prepare(history, { enabled: true }).triggers, []);
   assert.deepEqual(createProjectMemoryGateway().prepare(conversation([{ type: "text", text: "x" }, { ...call("toolu_bad"), input: "text" }], [error("toolu_bad")]), { enabled: true }).triggers, [{}]);
+  // 排队的子代理回报或任务通知作为单独的 user 消息跟在工具结果之后，仍然触发，但不在本地结束这一轮。
+  const queued = conversation();
+  queued.messages.push({ role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] }, { role: "user", content: "queued text" });
+  const queuedResult = createProjectMemoryGateway().prepare(queued, { enabled: true });
+  assert.deepEqual(queuedResult.triggers, [{ root: "/repo", changed_paths: ["src/a.js"] }]);
+  assert.equal(queuedResult.reply, null);
+  assert.deepEqual(createProjectMemoryGateway().prepare({ messages: [{ role: "user", content: [error("toolu_new")] }] }, { enabled: true }).triggers, []);
 });
 
 test("a local reply repeating the answer only for a written answer followed by our single call and its bare result", () => {

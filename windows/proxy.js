@@ -1138,9 +1138,9 @@ const cleanupObservationArchives = () => {
 };
 cleanupObservationArchives();
 setInterval(cleanupObservationArchives, 60 * 60 * 1000).unref();
-// 从未选择时尝试安装并启用，精确匹配的已知旧版先备份再升级；显式关闭或配置不安全时不自动安装。
+// 从未选择时尝试安装并启用，精确匹配的已知旧版先备份再升级；开关已开时只升级精确匹配的已知旧版；显式关闭或配置不安全时不自动安装。
 projectMemoryInstaller.autoEnable().then((result) => {
-  if (result) logEvent("project-memory", "Project Code Memory enabled automatically", { installed: result.changed, previous_skill_backed_up: result.replaced });
+  if (result) logEvent("project-memory", `Project Code Memory ${result.upgraded ? "upgraded" : "enabled"} automatically`, { installed: result.changed, previous_skill_backed_up: result.replaced });
 }).catch(() => logEvent("project-memory", "Project Code Memory stays off", { reason: "not installable" }));
 
 server.listen(PORT, "127.0.0.1", () => {

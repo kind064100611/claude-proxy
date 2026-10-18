@@ -484,7 +484,41 @@ test("autoEnable backs up only an exact registered previous deployment", async (
   }
 });
 
-test("autoEnable upgrades real historical button and whole-bundle targets from git blobs", async (t) => {
+test("autoEnable with the switch already on upgrades only an exact registered previous deployment", async (t) => {
+  const turnedOn = (f) => {
+    fs.mkdirSync(path.dirname(f.featureFile), { recursive: true });
+    fs.writeFileSync(f.featureFile, JSON.stringify({ version: 1, projectMemory: true }));
+  };
+  const f = fixture(t);
+  registerPreviousDeployment(f, syntheticPreviousFiles);
+  turnedOn(f);
+  const result = await f.installer.autoEnable();
+  assert.deepEqual([result.upgraded, result.enabled, result.replaced, result.installed], [true, true, true, true]);
+  for (const relative of INSTALL_FILES) assert.deepEqual(fs.readFileSync(path.join(f.target, relative)), fs.readFileSync(path.join(f.bundleRoot, relative)));
+  const [backup] = fs.readdirSync(path.join(f.configRoot, "claude-proxy/skill-backups"));
+  assert.equal(fs.readFileSync(path.join(f.configRoot, "claude-proxy/skill-backups", backup, "SKILL.md"), "utf8"), syntheticPreviousFiles["SKILL.md"]);
+  assert.equal(await f.installer.autoEnable(), null);
+
+  for (const change of ["modified", "unknown", "absent", "missing dependencies"]) {
+    const other = fixture(t);
+    if (change === "unknown") {
+      fs.mkdirSync(other.target, { recursive: true });
+      fs.writeFileSync(path.join(other.target, "SKILL.md"), "full workflow");
+    } else if (change !== "absent") registerPreviousDeployment(other, syntheticPreviousFiles);
+    if (change === "modified") fs.appendFileSync(path.join(other.target, "SKILL.md"), " with user text");
+    turnedOn(other);
+    if (change === "missing dependencies") {
+      other.dependencies.python = null;
+      await assert.rejects(other.installer.autoEnable(), { code: "PROJECT_MEMORY_UNAVAILABLE" });
+      assert.equal(fs.readFileSync(path.join(other.target, "SKILL.md"), "utf8"), syntheticPreviousFiles["SKILL.md"]);
+    } else assert.equal(await other.installer.autoEnable(), null, change);
+    if (change === "absent") assert.equal(fs.existsSync(other.target), false);
+    assert.equal(fs.existsSync(path.join(other.configRoot, "claude-proxy/skill-backups")), false, change);
+    assert.equal(JSON.parse(fs.readFileSync(other.featureFile, "utf8")).projectMemory, true);
+  }
+});
+
+test("autoEnable upgrades real historical button, whole-bundle and query-only targets from git blobs", async (t) => {
   const cases = [
     {
       revision: "f3fab02",
@@ -493,6 +527,10 @@ test("autoEnable upgrades real historical button and whole-bundle targets from g
     {
       revision: "530542c^",
       deployment: (entry) => entry.commit === "f3fab02" && /whole claude-proxy bundle/.test(entry.method),
+    },
+    {
+      revision: "47082d3",
+      deployment: (entry) => entry.commit === "47082d3",
     },
   ];
   for (const item of cases) {

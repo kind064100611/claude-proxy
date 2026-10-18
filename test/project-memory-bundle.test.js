@@ -16,7 +16,7 @@ const sourceFiles = [
   "scripts/pcm.py",
   "tests/test_pcm.py",
 ];
-const extraFiles = ["LICENSE", "SOURCE.md"];
+const extraFiles = ["LICENSE", "SOURCE.md", "scripts/query.py"];
 
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
@@ -30,6 +30,7 @@ test("bundle manifest identifies the pinned upstream and approved install files"
   });
   assert.deepEqual(manifest.installFiles, [
     "scripts/pcm.py",
+    "scripts/query.py",
     "LICENSE",
     "SOURCE.md",
     "SKILL.md",
@@ -63,10 +64,13 @@ test("every deployed file matches its manifest hash and has no unlisted files", 
 test("manifest retains real target and source previous-deployment fingerprints", () => {
   const deployments = manifest.previousDeployments;
   assert.ok(Array.isArray(deployments));
+  // 整包拷贝的旧版本还没有 scripts/query.py。
+  const wholeBundle = [...sourceFiles, "LICENSE", "SOURCE.md", "manifest.json"].sort();
   const expected = [
-    { commit: "f3fab02", files: [...Object.keys(manifest.files), "manifest.json"].sort(), method: /530542c\^/ },
+    { commit: "f3fab02", files: wholeBundle, method: /530542c\^/ },
     { commit: "ece898a", files: ["LICENSE", "SKILL.md", "SOURCE.md", "references/record-format.md", "scripts/pcm.py"] },
-    { commit: "ece898a", files: [...Object.keys(manifest.files), "manifest.json"].sort() },
+    { commit: "ece898a", files: wholeBundle },
+    { commit: "47082d3", files: ["LICENSE", "SKILL.md", "SOURCE.md", "scripts/pcm.py"] },
   ];
   for (const wanted of expected) {
     const deployment = deployments.find((entry) => entry.commit.startsWith(wanted.commit) &&
