@@ -127,9 +127,9 @@ for (const platform of ["mac", "windows"]) {
     assert.equal(memory.headers.get("access-control-allow-origin"), null);
     assert.deepEqual(memoryCalls, ["factory", true]);
     const models = await (await fetch(base + "/v1/models?limit=1000")).json();
-    assert.deepEqual(models.data.map((model) => model.id), ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test[1m]"]);
+    assert.deepEqual(models.data.map((model) => model.id), ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test"]);
     const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } };
-    for (const model of ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test[1m]"]) {
+    for (const model of ["claude-gateway/gpt-test", "claude-gateway/claude-sonnet-test"]) {
       for (const stream of [false, true]) {
         const result = await fetch(base + "/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model, stream, max_tokens: 50, system: "instructions", messages: [{ role: "user", content: [{ type: "text", text: "look" }, image] }],

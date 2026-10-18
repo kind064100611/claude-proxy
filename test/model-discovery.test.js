@@ -86,6 +86,25 @@ test("Codex catalog honors visibility and API support filters", async () => {
   assert.deepEqual((await getModels()).data.map((model) => model.id), ["gpt-5.4"]);
 });
 
+test("API discovery selects the largest valid declared limit, including max-only catalogs", async () => {
+  const getModels = createModelDiscovery({
+    loadClaudeAuth: async () => { throw new Error("no Copilot fixture"); },
+    loadAuth: async () => ({ kind: "api", token: "fixture" }),
+    fetchImpl: async () => ok({ data: [
+      { id: "gpt-test-1", max_context_window: 872000 },
+      { id: "gpt-test-2", context_window: 0, max_context_window: 872000 },
+      { id: "gpt-test-3", context_window: 872000, max_context_window: 500000 },
+      { id: "gpt-test-4", context_window: 500000, runtime: { max_input_tokens: 872000 } },
+      { id: "gpt-test-5", context_window: 500000, capabilities: { limits: { max_context_window_tokens: 872000 } } }
+    ] })
+  });
+  for (const model of (await getModels()).data) {
+    assert.equal(model.context_window, 872000);
+    assert.equal(model.runtime.max_input_tokens, 872000);
+    assert.equal(model.capabilities.limits.max_context_window_tokens, 872000);
+  }
+});
+
 test("a source that has never answered is omitted while the other source works", async () => {
   const getModels = createModelDiscovery({
     loadClaudeAuth: async () => { throw new Error("No Copilot credentials"); },
@@ -114,4 +133,23 @@ test("Claude catalog failures preserve only the stale Claude source", async () =
   clock = 300001;
   failCopilot = true;
   assert.deepEqual((await getModels()).data, initial.data);
+});
+
+test("Codex discovery defaults to the largest declared context and preserves output limits", async () => {
+  const models = createModelDiscovery({
+    loadAuth: async () => ({ kind: "codex", token: "fixture", accountId: "fixture-account" }),
+    loadClaudeAuth: async () => { throw new Error("no Copilot fixture"); },
+    fetchImpl: async () => ok({ models: [
+      { slug: "gpt-6.1-sol", context_window: 500000, max_context_window: 872000, visibility: "list" },
+      { slug: "gpt-6-luna", context_window: 1000000, max_output_tokens: 64000, visibility: "list" },
+      { slug: "gpt-6-terra", visibility: "list" }
+    ] })
+  });
+  const result = (await models()).data;
+  assert.equal(result[0].capabilities.limits.max_context_window_tokens, 872000);
+  assert.equal(result[0].context_window, 872000);
+  assert.equal(result[0].max_context_window, 872000);
+  assert.equal(result[0].runtime.max_input_tokens, 872000);
+  assert.equal(result[1].capabilities.limits.max_output_tokens, 64000);
+  assert.equal(result[2].capabilities, undefined);
 });
