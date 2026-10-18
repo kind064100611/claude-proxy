@@ -280,3 +280,26 @@ test("web search hooks rewrite the native body, see every event, and Copilot aut
   assert.deepEqual(seen, ["response.output_item.added", "response.completed"]);
   assert.equal(assembled.model, "gpt-6-luna");
 });
+
+test("context limit errors preserve reactive-compaction semantics for every provider envelope", async () => {
+  const failure = { code: "context_length_exceeded", type: "invalid_request_error", message: "Your input exceeds the context window of this model." };
+  const verify = (error) => error.status === 400 && error.code === failure.code && /^prompt is too long:/i.test(error.message);
+  for (const event of [
+    { type: "error", error: failure },
+    { ...failure, type: "error" },
+    { type: "response.failed", response: { status: "failed", error: failure } }
+  ]) {
+    await assert.rejects(requestResponses({ model: "gpt-6-sol", stream: true, messages: [] }, {
+      loadAuth: async () => ({ kind: "api", token: "test" }),
+      fetchImpl: async () => ({ ok: true, body: packets(frames([event])) })
+    }), verify);
+  }
+  await assert.rejects(requestResponses({ model: "gpt-6-sol", stream: false, messages: [] }, {
+    loadAuth: async () => ({ kind: "api", token: "test" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ status: "failed", error: failure }) })
+  }), verify);
+  await assert.rejects(requestResponses({ model: "gpt-6-sol", stream: false, messages: [] }, {
+    loadAuth: async () => ({ kind: "api", token: "test" }),
+    fetchImpl: async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ error: failure }) })
+  }), verify);
+});

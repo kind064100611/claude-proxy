@@ -1,4 +1,5 @@
 const http = require("http");
+const { estimateInputTokens } = require("../lib/token-count");
 const fs = require("fs");
 const path = require("path");
 
@@ -1065,6 +1066,12 @@ const server = http.createServer(async (req, res) => {
         }
         if (!isResponsesModel(model)) { sendJsonError(res, 400, `Unsupported model: ${model || "(missing)"}`); return; }
 
+        if (new URL(req.url, "http://localhost").pathname === "/v1/messages/count_tokens") {
+          // This is a read-only local estimate, never a Responses generation request.
+          res.writeHead(200, { "Content-Type": "application/json", "X-Token-Count-Method": "conservative-utf8-estimate" });
+          res.end(JSON.stringify({ input_tokens: estimateInputTokens(anthropicBody) }));
+          return;
+        }
         const openaiBody = convertAnthropicToOpenAI(anthropicBody, requestId);
         openaiBody.prompt_cache_key = getPromptCacheKey(anthropicBody);
         openaiBody.reasoning = getResponsesReasoning(anthropicBody);
