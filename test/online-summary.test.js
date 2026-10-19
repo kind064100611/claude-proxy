@@ -52,7 +52,7 @@ test("feature toggle defaults on in user HOME, CLI preserves other fields, and r
   const modulePath = path.resolve(__dirname, "../lib/online-summary");
   const scriptPath = path.resolve(__dirname, "../scripts/toggle-online-summary.js");
   const read = () => JSON.parse(execFileSync(process.execPath, ["-e", `const p = require(${JSON.stringify(modulePath)}); console.log(JSON.stringify({file:p.getFeatureConfigPath(),status:p.createOnlineSummary().getStatus()}));`], { cwd: home, env, encoding: "utf8" }));
-  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null } });
+  assert.deepEqual(read(), { file: filename, status: { onlineSummary: true, summaryModel: null, summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null, claudeLauncher: null } });
   execFileSync(process.execPath, [scriptPath, "status"], { cwd: home, env });
   assert.equal(fs.existsSync(path.dirname(filename)), false);
   fs.mkdirSync(path.dirname(filename), { mode: 0o700 });
@@ -342,7 +342,7 @@ test("summary model selection persists, is validated and can return to automatic
   assert.equal(fs.existsSync(filename), false);
   assert.deepEqual(await settings.configure({ summaryModel: "claude-haiku-5.5" }), { enabled: true, model: "claude-haiku-5.5", defaultModel: "gpt-6-luna", models, threshold: 8192, thresholds, ...prompts });
   await settings.configure({ onlineSummary: false, summaryThreshold: 8192 });
-  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null });
+  assert.deepEqual(getStatus(filename), { onlineSummary: false, summaryModel: "claude-haiku-5.5", summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null, claudeLauncher: null });
   await assert.rejects(settings.configure({ summaryThreshold: 1000 }), { code: "INVALID_SUMMARY_THRESHOLD" });
   await assert.rejects(settings.configure({ summaryModel: "not-listed" }), { code: "UNKNOWN_SUMMARY_MODEL" });
   assert.equal(getStatus(filename).summaryModel, "claude-haiku-5.5");
@@ -353,7 +353,7 @@ test("summary model selection persists, is validated and can return to automatic
   assert.throws(() => setFeatures({ onlineSummary: "yes" }, filename));
   assert.throws(() => setFeatures({ summaryModel: "bad model id" }, filename));
   fs.writeFileSync(filename, JSON.stringify({ version: 1, summaryModel: "bad model id", summaryThreshold: 5000 }));
-  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null });
+  assert.deepEqual(getStatus(filename), { onlineSummary: true, summaryModel: null, summaryThreshold: 8192, summaryPrompt: null, archiveRetentionDays: 30, projectMemory: null, claudeLauncher: null });
   assert.equal(fs.existsSync(path.join(home, "other-cli-root")), false);
 });
 
@@ -539,4 +539,64 @@ test("cleanup keeps sessions that are still used, ignores invalid retention valu
   assert.equal(pack.cleanup(), 0);
   fs.chmodSync(archiveRoot, 0o700);
   assert.equal(pack.cleanup(), 1);
+});
+
+test("claudeLauncher is tri-state, preserves other fields, and is off for malformed or unsafe configuration", (t) => {
+  const { filename } = featureFixture(t);
+  assert.equal(getStatus(filename).claudeLauncher, null);
+  assert.throws(() => setFeatures({ claudeLauncher: "true" }, filename));
+  assert.equal(fs.existsSync(filename), false);
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filename, '{"version":1,"onlineSummary":false,"projectMemory":true}');
+  assert.equal(getStatus(filename).claudeLauncher, null);
+  setFeatures({ claudeLauncher: true }, filename);
+  assert.deepEqual(JSON.parse(fs.readFileSync(filename, "utf8")), { version: 1, onlineSummary: false, projectMemory: true, claudeLauncher: true });
+  assert.equal(getStatus(filename).claudeLauncher, true);
+  setFeatures({ claudeLauncher: false }, filename);
+  assert.equal(getStatus(filename).claudeLauncher, false);
+  for (const bytes of ['{"version":1,"claudeLauncher":"true"}', '{"version":1,"claudeLauncher":1}', '{"version":1,"claudeLauncher":null}', '{"version":2,"claudeLauncher":true}', "{broken"]) {
+    fs.writeFileSync(filename, bytes);
+    assert.equal(getStatus(filename).claudeLauncher, false);
+  }
+  fs.rmSync(filename);
+  const real = path.join(path.dirname(filename), "real.json");
+  fs.writeFileSync(real, '{"version":1,"claudeLauncher":true}');
+  fs.symlinkSync(real, filename);
+  assert.equal(getStatus(filename).claudeLauncher, false);
+});
+
+test("getStatus and setFeatures use an injected fs and reject other-owned files or parents", (t) => {
+  const { filename } = featureFixture(t);
+  setFeatures({ claudeLauncher: true }, filename);
+  const calls = [];
+  const spy = new Proxy(fs, { get: (target, key) => typeof target[key] === "function"
+    ? (...args) => { calls.push(key); return target[key](...args); } : target[key] });
+  assert.equal(getStatus(filename, spy).claudeLauncher, true);
+  assert.ok(calls.includes("lstatSync") && calls.includes("openSync"));
+  calls.length = 0;
+  setFeatures({ claudeLauncher: false }, filename, spy);
+  assert.ok(calls.includes("writeFileSync") && calls.includes("renameSync"));
+  assert.equal(getStatus(filename).claudeLauncher, false);
+  if (!process.getuid) return;
+  const foreign = (match) => ({ ...fs, lstatSync: (file, ...rest) => {
+    const stat = fs.lstatSync(file, ...rest);
+    return match(file) ? Object.create(stat, { uid: { value: process.getuid() + 1 } }) : stat;
+  } });
+  for (const match of [(file) => file === filename, (file) => file === path.dirname(filename)]) {
+    const status = getStatus(filename, foreign(match));
+    assert.equal(status.claudeLauncher, false);
+    assert.equal(status.onlineSummary, false);
+    assert.equal(status.projectMemory, false);
+  }
+});
+
+test("setFeatures leaves the file untouched when the resulting bytes are identical", (t) => {
+  const { filename } = featureFixture(t);
+  setFeatures({ claudeLauncher: true }, filename);
+  const before = fs.statSync(filename);
+  const writes = [];
+  const spy = { ...fs, writeFileSync: (...args) => { writes.push(args[0]); return fs.writeFileSync(...args); } };
+  setFeatures({ claudeLauncher: true }, filename, spy);
+  assert.deepEqual(writes, []);
+  assert.equal(fs.statSync(filename).ino, before.ino);
 });

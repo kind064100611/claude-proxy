@@ -100,6 +100,8 @@ Open `http://127.0.0.1:8082/login`. The launchers do not install services or mod
 
 The proxy listens only on `127.0.0.1:8082`. There is no environment variable for changing the port or enabling a remote listener. Do not start both platform proxies at once.
 
+After listening succeeds on **macOS + zsh**, the proxy automatically checks/installs the [capacity launcher function](#automatic-gpt-capacity-on-session-start-macos--zsh) in `~/.zshrc`. An identical existing block is adopted without rewriting the file or creating a backup. Windows and Linux skip this installation without reading shell or feature configuration files. Installation conflicts only warn; they do not stop the proxy. A failed port bind never triggers shell installation.
+
 ## Login and credentials
 
 ### ChatGPT / Codex device authorization
@@ -157,7 +159,7 @@ Importing a module does not create credential directories or migrate files. `CLA
 1. Keep the proxy running and configure at least one upstream authentication method first.
 2. On `/login`, wait until **Configure Claude CLI** is enabled, then click it.
 3. The proxy validates the CLI installation, credentials, settings structure, and authentication conflicts, then selects an available model from the dynamic catalog that matches the current credentials.
-4. **Open a new terminal** and run `claude`. Use `/model` in an interactive session to switch models.
+4. **Open a new terminal** and run `claude`. Use `/model` in an interactive session to switch models. On macOS + zsh, proxy startup separately installs the [capacity entry point](#automatic-gpt-capacity-on-session-start-macos--zsh); the web configuration button does not manage it.
 
 The default settings file is `~/.claude/settings.json`. When `CLAUDE_CONFIG_DIR` is set, the proxy uses the actual `settings.json` in that directory, with support for `~` expansion. Model settings are cached by mtime and reread on later requests when the file changes.
 
@@ -176,7 +178,7 @@ The configuration button merges these fields:
 }
 ```
 
-`sk-placeholder` is a local routing placeholder, not an upstream API key. The operation removes the superseded `env.ANTHROPIC_AUTH_TOKEN` while preserving unrelated environment variables, hooks, permissions, plugins, `model`, and an existing `statusLine`. An existing explicit model is retained when available; otherwise, the first catalog entry matching the credentials is selected. No fixed model or subagent default is installed.
+`sk-placeholder` is a local routing placeholder, not an upstream API key. The operation removes the superseded `env.ANTHROPIC_AUTH_TOKEN` while preserving unrelated environment variables, hooks, permissions, plugins, `model`, and an existing `statusLine`. An existing explicit model is retained when available; otherwise, the first catalog entry matching the credentials is selected. No fixed model version is installed. The separate startup-only GPT subagent sync below does not change the main session model or gateway routing fields.
 
 Before writing, the original settings bytes, including any BOM and formatting, are backed up to:
 
@@ -188,7 +190,74 @@ The backup directory and regular backup files are private. Configuration operati
 
 Conflicts such as `apiKeyHelper`, `proxyAuthHelper`, forced login settings, other cloud authentication modes, or gateway helpers must be resolved manually; the button does not silently delete them. Shell, project, local, and managed settings may still override user settings. The proxy does not read or write Claude's `.credentials.json`.
 
-**Starting the proxy, importing modules, opening the page, and querying status do not write CLI settings.** Configuration runs only through a local nonce-protected, same-origin JSON `POST /api/auth/claude/configure` with a body of `{}`. To restore settings, first stop using the gateway, inspect the relevant private backup, and restore the required fields manually. Do not overwrite personal settings added since the backup.
+**Importing modules, opening the page, and querying status do not write CLI settings.** Main-session gateway configuration runs only through a local nonce-protected, same-origin JSON `POST /api/auth/claude/configure` with a body of `{}`. Proxy startup has one narrow settings exception: the automatic GPT subagent defaults described below. To restore settings, first stop using the gateway, inspect the relevant private backup, and restore the required fields manually. Do not overwrite personal settings added since the backup.
+
+### Automatic GPT subagent defaults on proxy startup
+
+After successfully binding the port, both platform proxies start one nonblocking sync using the current GPT credentials and dynamic model catalog. This does not wait before serving requests, run on a failed bind, or poll in the background. It writes only these two environment settings in the actual CLI settings file:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "<canonical anthropic/GPT ID selected from the current catalog>",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1"
+  }
+}
+```
+
+Selection prefers an existing available GPT subagent model, then an available GPT `env.ANTHROPIC_MODEL`, then an available GPT top-level `model`, then the first available GPT catalog entry. It never hardcodes a GPT version or adds `[1m]` to GPT IDs. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` requires **Claude Code v2.1.257+**: ordinary subagents use the selected GPT even when their definitions request another model. Official forked-agent inheritance and skills using `model: inherit` remain exceptions and follow Claude Code's own inheritance rules.
+
+GPT credentials may be saved OAuth credentials, a saved API key, or `OPENAI_API_KEY`. An expired saved OAuth access token is not treated as logout; startup does not initiate a login request. Without valid GPT credentials (including credentials removed while discovery is pending), the sync skips without changing or deleting existing defaults; with no available GPT model, it also keeps settings unchanged. Unsafe settings or discovery/save failures leave the existing settings intact and produce a fixed, credential-safe warning. Retry happens on the next proxy startup, not a timer.
+
+Writes use the private exact-byte backups and serialized, conflict-checked atomic settings merge described above. Repeated startups with identical values do not rewrite settings or create another backup. Unrelated settings, the main session's `model` / `ANTHROPIC_MODEL`, and gateway routing fields are preserved: configuring the main session still requires the website button. Existing Claude processes do not reload their environment; start a new CLI session to use the defaults.
+
+### Automatic GPT capacity on session start (macOS + zsh)
+
+Claude Code 2.1.303's gateway discovery keeps model IDs, names, and descriptions, but does not use catalog capacity metadata to set GPT's session window. `lib/claude-launch.js` fetches `/v1/models` on **each session start** (3-second timeout, using the proxy's existing catalog cache) and passes `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the official CLI. It does not patch the official executable or save a fixed capacity in global settings.
+
+There are three separate steps:
+
+1. **Proxy startup:** after successfully binding the port, check/install the function in `~/.zshrc`. Write only when it is missing or an exact project template has stale Node/repository paths. An identical manually installed block is adopted without touching `.zshrc` or making a backup. Startup does not request or freeze capacity.
+2. **New terminal:** zsh loads the function. The proxy never sources user configuration, changes an existing terminal's environment, or updates an already-running Claude session.
+3. **Plain `claude` launch:** the existing launcher fetches the current catalog and injects capacity only into that CLI child process. Node is resolved from PATH each time, with the installer's verified Node executable as fallback.
+
+The managed block looks like this (the installer fills in safely quoted absolute paths; no manual paste is required):
+
+```zsh
+# >>> claude-proxy capacity launcher >>>
+claude() {
+  local node_command
+  node_command="$(whence -p node)" || node_command='/absolute/path/to/node'
+  "$node_command" '/absolute/path/to/claude-proxy/lib/claude-launch.js' "$@"
+}
+# <<< claude-proxy capacity launcher <<<
+```
+
+Open a new terminal: `whence -w claude` should report a function, and `claude --version` should still print the official version. Continue running plain `claude` normally. The launcher uses `createSetupProbe` to locate real CLI files and starts them without a shell, so the function cannot recurse through PATH. It preserves the arguments, working directory, standard streams, exit status, and existing interrupt handling. Standalone help/version and recognized maintenance subcommands (including `update`/`upgrade`) pass through without a catalog request or added model arguments.
+
+**Safety and conflicts:** before any shell-file change, the installer saves the exact original bytes to `<actual CLI config directory>/claude-proxy/zsh-backups/zshrc-<SHA-256>` (directory `0700`, file `0600`; identical verified backups are reused). A missing `.zshrc` is created with mode `0600`, without inventing an original backup. Other bytes, existing line endings, and original file permissions are preserved; newly appended shell code uses LF for zsh compatibility. A same-directory exclusive temporary file is checked with `/bin/zsh -f -n`, then the target's identity and bytes are rechecked before atomic publication. Concurrent edits abort the change.
+
+Unknown `claude` aliases/functions outside the block, edited/duplicate/broken markers, symlinks, non-regular files, unsafe ownership/permissions, unsafe backup paths, and syntax errors leave the original shell file unchanged and warn. Checks are static and limited to the target file: definitions loaded dynamically from other sourced files cannot be reliably detected. Inspect `whence -w claude` in a new terminal if another shell manager also configures it. Explicit non-zsh `SHELL` values are skipped; macOS service environments without `SHELL` use the default zsh behavior. A custom `ZDOTDIR` outside home warns and skips rather than modifying a file zsh will not load.
+
+Capacity rules and boundaries:
+
+- Without an explicit `--model` or process-environment `ANTHROPIC_MODEL`, use the **smallest valid declared GPT window** in the catalog. This also covers a model chosen only by official user/project/`--settings` settings. No model argument or model environment variable is injected in this branch, and the launcher does not read or rewrite those settings: Claude Code still chooses the model.
+- An explicitly selected, known GPT uses its own valid capacity; a known Claude selection retains the shared GPT fallback for later switches. Explicit unknown models or selections without a valid capacity do not borrow another model's limit. A caller-provided `CLAUDE_CODE_MAX_CONTEXT_TOKENS` takes priority.
+- Normal recognized Claude models continue using Claude Code's own context logic. No `DISABLE_COMPACT` or global forced `[1m]` marker is added.
+- Automatic refresh happens at **process startup**, not inside an existing session. If GPT capacities differ, ordinary launches use the shared minimum; explicitly starting a GPT can use its individual capacity. The existing difference warning remains: `/model` does not promise arbitrary, exact per-model window updates within one process.
+- A catalog declaration is **not a guarantee of the account's actual allowance**. If the proxy is unavailable or returns invalid catalog data, the launcher warns and starts the official CLI with the original arguments and context behavior; it does not invent a capacity.
+- This entry point covers this user's zsh terminal only. IDE/desktop launches and direct execution of the official binary bypass it. Windows/Linux entry points are unchanged. No background polling, PATH modification/shim, or replacement of `~/.local/bin/claude` is installed. After moving the repository or changing Node, start the proxy from the new installation (or run `--enable` below) to update only its recognized block.
+
+**Persistent disable / re-enable** (run from the repository root, with the same home and `CLAUDE_CONFIG_DIR` as the proxy):
+
+```bash
+node lib/claude-launcher-install.js --disable
+node lib/claude-launcher-install.js --enable
+```
+
+`--disable` first saves `claudeLauncher: false` to `~/.claude/gateway-features.json`, then backs up and removes only an exact recognized block, preserving later user configuration. Subsequent proxy startups will not reinstall it. A modified block is left intact with a warning, but the opt-out remains saved. `--enable` safely installs/adopts the block and records `true` only after success; it never overwrites an unknown definition or modified block. Missing `claudeLauncher` means automatically attempt installation; `true` maintains the recognized block, while damaged/unsafe feature configuration disables automatic installation. Other feature settings are retained.
+
+After disabling, open a new terminal (or `unfunction claude` in the current one). Keep private backups for inspection; do not restore the whole file over shell configuration added later. The official CLI and its settings remain unchanged. Removing the block manually without saving the opt-out is not a persistent uninstall.
 
 ## Configuring Statusline
 
@@ -507,6 +576,8 @@ HOME="$TEST_HOME" CLAUDE_CONFIG_DIR="$TEST_HOME/config" \
 In Windows PowerShell, create a separate temporary directory and set `HOME`, `USERPROFILE`, and `CLAUDE_CONFIG_DIR` for that test run, restoring the original environment afterward. `node --check` also works on Windows; `bash -n` / `cmp` require Git Bash or equivalent tools.
 
 The default suite uses mocked upstreams and temporary directories. It covers device authorization, token-refresh races, catalog invalidation, JSON / SSE, tools / images, cache usage, Responses replay, genuine client disconnects, login-route security, and private settings backups. HTTP end-to-end tests exercise both GPT and Copilot paths and reject unknown models. Statusline tests deploy/run only in temporary roots with synthetic input. Service tests mock system-management commands and run fake proxies on random non-8082 ports; VM/e2e tests inject a fake service. Project Code Memory tests use temporary CLI roots, fake dependency/model calls, and isolated Python `pcm.py` runs in temporary repositories, covering exact-file recognition, explicit backup replacement, known-older automatic upgrades, symlink/path safety, first-start enablement, explicit off, serialized installation/removal, empty-target races, publication-failure recovery, backup/cache retention, local JSON/SSE replies, record validation, and failed-write cleanup. Online Summary tests use temporary settings/archive roots and fake summary models. No real Statusline configuration, global skill installation, or launchd registration/restart is performed.
+
+Capacity-launcher tests use temporary homes/config roots for adoption, path refresh, persistent opt-out, private digest backups, shell conflicts, permissions/symlinks, syntax failures, concurrent edits, fresh-zsh argument forwarding, and Node PATH/fallback behavior. Full-startup VM tests cover the branch after the inert legacy settings-sync boundary: launcher installation and GPT subagent sync run only after listening succeeds, never block startup, and only warn on failure. GPT sync tests inject a temporary config root, empty environment, mock credential store, and fake dynamic catalog into the real setup factory, covering absent/disappearing credentials, unavailable models, exact backups, idempotent restarts, unrelated-settings preservation, and credential-safe failure logging. They do not restart the current proxy or modify real user settings or `.zshrc`.
 
 Historical installer upgrade tests read original Git blobs at `f3fab02` and `530542c^`; the checkout must include those objects (a history-free archive or overly shallow clone is insufficient).
 

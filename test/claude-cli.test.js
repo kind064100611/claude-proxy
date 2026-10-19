@@ -245,7 +245,7 @@ test("launcher applies a fixed GPT window across GPT/Claude switching; compactio
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const directories = [];
   // Opus reports 900K used; only a switch back to the 872K GPT window must compact before GPT is called.
-  const run = async (switchBack) => {
+  const run = async (switchBack, settingsOnly = false) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-switch-test-"));
     directories.push(directory);
     // A stale 1M gateway spelling in the environment still launches GPT at its catalog window.
@@ -254,8 +254,10 @@ test("launcher applies a fixed GPT window across GPT/Claude switching; compactio
     for (const key of Object.keys(env)) {
       if (key === "CLAUDECODE" || key === "CLAUDE_CODE_MAX_CONTEXT_TOKENS" || key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_CODE_USE_")) delete env[key];
     }
-    Object.assign(env, { ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, ANTHROPIC_API_KEY: "test-only",
-      ANTHROPIC_MODEL: "anthropic/gpt-6.1-sol[1m]" });
+    Object.assign(env, { ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, ANTHROPIC_API_KEY: "test-only" });
+    // Settings-only launch: the model comes solely from user settings, with no ANTHROPIC_MODEL or --model.
+    if (settingsOnly) fs.writeFileSync(path.join(directory, "settings.json"), JSON.stringify({ model: "gpt-6.1-sol" }));
+    else env.ANTHROPIC_MODEL = "anthropic/gpt-6.1-sol[1m]";
     const child = require("child_process").spawn(process.execPath, [path.resolve("lib/claude-launch.js"), "-p", "--input-format", "stream-json",
       "--output-format", "stream-json", "--verbose", "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
       "--no-session-persistence", "--tools", ""], { cwd: directory, env });
@@ -283,6 +285,7 @@ test("launcher applies a fixed GPT window across GPT/Claude switching; compactio
     };
     try {
       const turns = [await turn("turn-1", 1000)];
+      if (settingsOnly) return turns;
       await setModel("claude-opus-5.5[1m]");
       turns.push(await turn("turn-2", 900000));
       if (switchBack) await setModel("gpt-6.1-sol");
@@ -297,6 +300,8 @@ test("launcher applies a fixed GPT window across GPT/Claude switching; compactio
     assert.deepEqual(switched[1].requests.map((row) => row.summary), [false], "900K fits Opus's declared 1M window");
     assert.ok(switched[2].requests.some((row) => row.summary), "900K exceeds GPT's 872K window: " + JSON.stringify(switched[2].requests));
     assert.deepEqual(switched[2].requests.at(-1), { model: "gpt-6.1-sol", summary: false });
+    const fromSettings = await run(false, true);
+    assert.deepEqual(fromSettings[0].windows, { "gpt-6.1-sol": 872000 }, "settings-only model must get the catalog window");
     const stayed = await run(false);
     assert.ok(stayed[2].requests.every((row) => !row.summary), "staying on Opus must not compact: " + JSON.stringify(stayed[2].requests));
   } finally {

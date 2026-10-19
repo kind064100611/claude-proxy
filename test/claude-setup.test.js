@@ -21,6 +21,209 @@ function fixture(t, options = {}) {
   return { root, settingsFile, state, base, setup, read: () => JSON.parse(fs.readFileSync(settingsFile, "utf8")),
     write: (value) => fs.writeFileSync(settingsFile, typeof value === "string" ? value : JSON.stringify(value)) };
 }
+test("GPT startup sync merges only subagent env, backs up exact bytes and is idempotent", async (t) => {
+  const f = fixture(t);
+  const original = { env: { OTHER: "keep", ANTHROPIC_MODEL: "claude-opus-5-5", ANTHROPIC_BASE_URL: "https://unchanged.test",
+    ANTHROPIC_API_KEY: "unchanged", ANTHROPIC_AUTH_TOKEN: "keep-token", CLAUDE_CODE_SUBAGENT_MODEL: "opus", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "0" },
+    model: "sonnet", hooks: { Stop: [] }, permissions: { allow: ["Read"] }, enabledPlugins: { local: true },
+    statusLine: { type: "command", command: "keep" }, extra: { untouched: true } };
+  const bytes = Buffer.from("﻿" + JSON.stringify(original, null, 4) + "\n");
+  fs.writeFileSync(f.settingsFile, bytes);
+  const result = await f.setup.syncGptSubagentModel();
+  assert.equal(result.model, "anthropic/gpt-test");
+  assert.deepEqual(f.read(), { ...original, env: { ...original.env,
+    CLAUDE_CODE_SUBAGENT_MODEL: "anthropic/gpt-test", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" } });
+  assert.equal(f.state.probes, 0);
+  assert.equal(f.state.deployed, 0);
+  const backups = path.join(f.root, "claude-proxy", "settings-backups");
+  const backup = path.join(backups, fs.readdirSync(backups)[0]);
+  assert.deepEqual(fs.readFileSync(backup), bytes);
+  const saved = fs.readFileSync(f.settingsFile);
+  const before = fs.statSync(f.settingsFile);
+  await f.setup.syncGptSubagentModel();
+  assert.deepEqual(fs.readFileSync(f.settingsFile), saved);
+  assert.equal(fs.statSync(f.settingsFile).ino, before.ino);
+  assert.equal(fs.statSync(f.settingsFile).mtimeMs, before.mtimeMs);
+  assert.equal(fs.readdirSync(backups).length, 1);
+});
+
+for (const auth of [{}, { "github-copilot": { type: "oauth", access: "access", refresh: "refresh", expires: 0 } },
+  { openai: { type: "api_key", key: " " } }, { "openai-codex": { type: "oauth", access: "access", refresh: "", expires: 0 } }]) {
+  test("GPT startup sync with no GPT credential does not read settings, discover or probe", async (t) => {
+    const f = fixture(t);
+    f.state.auth = auth;
+    f.write("invalid-settings-must-not-be-read");
+    const setup = createClaudeSetup({ ...f.base, fsImpl: { ...fs, lstatSync() { assert.fail("must not read settings"); } } });
+    assert.equal((await setup.syncGptSubagentModel()).skipped, true);
+    assert.equal(f.state.catalogs, 0);
+    assert.equal(f.state.probes, 0);
+    assert.equal(fs.readFileSync(f.settingsFile, "utf8"), "invalid-settings-must-not-be-read");
+  });
+}
+
+test("GPT startup sync without credentials retains existing subagent values", async (t) => {
+  const f = fixture(t);
+  f.state.auth = {};
+  const original = '{ "env": {"CLAUDE_CODE_SUBAGENT_MODEL":"anthropic/gpt-old","CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"1"} }\n';
+  f.write(original);
+  await f.setup.syncGptSubagentModel();
+  assert.equal(fs.readFileSync(f.settingsFile, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(f.root), ["settings.json"]);
+});
+
+for (const provider of ["openai", "openai-codex", "environment"]) {
+  test(`GPT startup sync accepts ${provider} credentials including expired OAuth`, async (t) => {
+    const f = fixture(t);
+    f.state.auth = provider === "environment" ? {} : { [provider]: { type: "oauth", access: "private-access", refresh: "private-refresh", expires: 0 } };
+    const setup = createClaudeSetup({ ...f.base, env: provider === "environment" ? { OPENAI_API_KEY: "private-key" } : {} });
+    await setup.syncGptSubagentModel();
+    assert.deepEqual(f.read(), { env: { CLAUDE_CODE_SUBAGENT_MODEL: "anthropic/gpt-test", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" } });
+    assert.equal(f.state.probes, 0);
+  });
+}
+
+for (const [settings, expected] of [
+  [{ env: { CLAUDE_CODE_SUBAGENT_MODEL: "claude-gateway/gpt-second", ANTHROPIC_MODEL: "gpt-first" } }, "gpt-second"],
+  [{ env: { CLAUDE_CODE_SUBAGENT_MODEL: "anthropic/gpt-removed", ANTHROPIC_MODEL: "anthropic/gpt-second" } }, "gpt-second"],
+  [{ env: { ANTHROPIC_MODEL: "gpt-second" }, model: "gpt-first" }, "gpt-second"],
+  [{ env: { ANTHROPIC_MODEL: "claude-opus-5-5" }, model: "claude-gateway/gpt-second" }, "gpt-second"],
+  [{ env: { ANTHROPIC_MODEL: "claude-opus-5-5", CLAUDE_CODE_SUBAGENT_MODEL: "haiku" } }, "gpt-first"],
+  [{ model: "gpt-removed" }, "gpt-first"],
+  [{}, "gpt-first"]
+]) {
+  test(`GPT startup sync selects ${expected} from available GPTs for ${JSON.stringify(settings)}`, async (t) => {
+    const f = fixture(t);
+    f.write(settings);
+    const setup = createClaudeSetup({ ...f.base, getAvailableModels: async (options) => {
+      assert.deepEqual(options, { waitForRefresh: true });
+      return { data: [{ id: "claude-opus-5-5" }, { id: "gpt-oss-120b" }, { id: "other" },
+        { id: "gpt-first", context_window: 1000000 }, { id: "gpt-second" }] };
+    } });
+    assert.equal((await setup.syncGptSubagentModel()).model, `anthropic/${expected}`);
+    assert.deepEqual(f.read(), { ...settings, env: { ...settings.env,
+      CLAUDE_CODE_SUBAGENT_MODEL: `anthropic/${expected}`, CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" } });
+  });
+}
+
+test("GPT startup sync canonicalizes catalog prefixes and removes stale GPT context suffixes", async (t) => {
+  const f = fixture(t);
+  f.write({ env: { CLAUDE_CODE_SUBAGENT_MODEL: "gpt-second[1m]" } });
+  const setup = createClaudeSetup({ ...f.base, getAvailableModels: async () => ({ data: [
+    { id: "anthropic/gpt-first" }, { id: "claude-gateway/gpt-second[1m]", context_window: 1000000 }
+  ] }) });
+  assert.equal((await setup.syncGptSubagentModel()).model, "anthropic/gpt-second");
+  assert.equal(f.read().env.CLAUDE_CODE_SUBAGENT_MODEL, "anthropic/gpt-second");
+});
+
+test("GPT startup sync does not rewrite already correct formatted settings or create backups", async (t) => {
+  const f = fixture(t);
+  const original = '﻿{ "env": { "CLAUDE_CODE_SUBAGENT_MODEL": "anthropic/gpt-test", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1" } }\n';
+  f.write(original);
+  await f.setup.syncGptSubagentModel();
+  assert.equal(fs.readFileSync(f.settingsFile, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(f.root), ["settings.json"]);
+});
+
+test("GPT startup sync rechecks credentials after discovery and merges only latest settings", async (t) => {
+  const f = fixture(t);
+  f.write({ env: { ANTHROPIC_MODEL: "gpt-first" } });
+  const latest = { env: { KEEP: "latest", ANTHROPIC_MODEL: "gpt-second" }, permissions: { deny: ["Bash"] } };
+  const setup = createClaudeSetup({ ...f.base, getAvailableModels: async () => {
+    f.write(latest);
+    return { data: [{ id: "gpt-first" }, { id: "gpt-second" }] };
+  } });
+  assert.equal((await setup.syncGptSubagentModel()).model, "anthropic/gpt-second");
+  assert.deepEqual(f.read(), { ...latest, env: { ...latest.env,
+    CLAUDE_CODE_SUBAGENT_MODEL: "anthropic/gpt-second", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" } });
+  const original = fs.readFileSync(f.settingsFile);
+  const vanished = createClaudeSetup({ ...f.base, getAvailableModels: async () => {
+    f.state.auth = {}; return { data: [{ id: "gpt-test" }] };
+  } });
+  assert.equal((await vanished.syncGptSubagentModel()).skipped, true);
+  assert.deepEqual(fs.readFileSync(f.settingsFile), original);
+});
+
+test("GPT startup sync rejects empty/non-GPT/failed catalogs with sanitized failures and no changes", async (t) => {
+  const f = fixture(t);
+  f.write({ untouched: true });
+  for (const getAvailableModels of [async () => ({ data: [] }), async () => ({ data: [{ id: "claude-opus-5-5" }, { id: "gpt-oss-120b" }] }),
+    async () => { throw new Error("private-upstream-secret"); }]) {
+    const setup = createClaudeSetup({ ...f.base, getAvailableModels });
+    await assert.rejects(setup.syncGptSubagentModel(), (error) => {
+      assert.equal(error.setupCode, "models");
+      assert.doesNotMatch(error.message, /private/);
+      return true;
+    });
+    assert.deepEqual(f.read(), { untouched: true });
+    assert.deepEqual(fs.readdirSync(f.root), ["settings.json"]);
+  }
+});
+
+test("GPT startup sync validates initial and latest conflicts without deleting helpers", async (t) => {
+  const f = fixture(t);
+  for (const settings of [{ apiKeyHelper: "private-command" }, { env: { CLAUDE_CODE_USE_BEDROCK: "1" } }, { forceLoginMethod: "gateway" }]) {
+    f.write(settings);
+    await assert.rejects(f.setup.syncGptSubagentModel(), { setupCode: "conflict" });
+    assert.equal(f.state.catalogs, 0);
+    assert.deepEqual(f.read(), settings);
+    f.write({});
+    const setup = createClaudeSetup({ ...f.base, getAvailableModels: async () => {
+      f.write(settings); return { data: [{ id: "gpt-test" }] };
+    } });
+    await assert.rejects(setup.syncGptSubagentModel(), { setupCode: "conflict" });
+    assert.deepEqual(f.read(), settings);
+  }
+});
+
+test("GPT startup sync creates a missing custom root but never changes global config or shell files", async (t) => {
+  const f = fixture(t);
+  const configRoot = path.join(f.root, "missing", "cli");
+  const globals = path.join(f.root, ".claude.json");
+  const zshrc = path.join(f.root, ".zshrc");
+  const original = '{"customApiKeyResponses":{"rejected":["sk-placeholder"]}}';
+  fs.writeFileSync(globals, original);
+  fs.writeFileSync(zshrc, "keep-shell-bytes\n");
+  const setup = createClaudeSetup({ ...f.base, configRoot, home: f.root });
+  await setup.syncGptSubagentModel();
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(configRoot, "settings.json"))), {
+    env: { CLAUDE_CODE_SUBAGENT_MODEL: "anthropic/gpt-test", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" }
+  });
+  assert.equal(fs.readFileSync(globals, "utf8"), original);
+  assert.equal(fs.readFileSync(zshrc, "utf8"), "keep-shell-bytes\n");
+  assert.equal(fs.existsSync(f.settingsFile), false);
+  assert.deepEqual(fs.readdirSync(path.join(configRoot, "claude-proxy", "settings-backups")), []);
+});
+
+test("GPT startup sync safely rejects save failures and final-snapshot races", async (t) => {
+  const f = fixture(t);
+  const original = '{ "untouched": true }\n';
+  f.write(original);
+  const failed = createClaudeSetup({ ...f.base, fsImpl: { ...fs, renameSync() { throw new Error("private-save-error"); } } });
+  await assert.rejects(failed.syncGptSubagentModel(), (error) => {
+    assert.equal(error.setupCode, "save"); assert.doesNotMatch(error.message, /private/); return true;
+  });
+  assert.equal(fs.readFileSync(f.settingsFile, "utf8"), original);
+  const setup = createClaudeSetup({ ...f.base, fsImpl: { ...fs, writeFileSync(file, ...args) {
+    fs.writeFileSync(file, ...args);
+    if (file.endsWith(".tmp")) f.write({ external: true });
+  } } });
+  await assert.rejects(setup.syncGptSubagentModel(), { setupCode: "changed" });
+  assert.deepEqual(f.read(), { external: true });
+  assert.equal(fs.readdirSync(f.root).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("GPT startup sync serializes with web-button writes and preserves all three merges", async (t) => {
+  const f = fixture(t);
+  f.write({ env: { KEEP: "yes" } });
+  const second = createClaudeSetup(f.base);
+  await Promise.all([f.setup.configureCli(), second.syncGptSubagentModel(), second.configureStatusline()]);
+  assert.equal(f.read().env.KEEP, "yes");
+  assert.equal(f.read().env.ANTHROPIC_BASE_URL, "http://localhost:8082");
+  assert.equal(f.read().env.CLAUDE_CODE_SUBAGENT_MODEL, "anthropic/gpt-test");
+  assert.equal(f.read().env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, "1");
+  assert.equal(f.read().statusLine.command, "test-statusline-command");
+});
+
 test("read-only status uses cached probes, never models or configuration writes, and credentials gate only CLI", async (t) => {
   const f = fixture(t);
   f.state.auth = {};
@@ -73,6 +276,8 @@ for (const value of ["invalid-private-content", "[]", "null", '{"env":[]}', '{"e
     assert.equal((await f.setup.getStatus()).claudeCli.ready, false);
     await assert.rejects(f.setup.configureCli(), /Settings/);
     await assert.rejects(f.setup.configureStatusline(), /Settings/);
+    await assert.rejects(f.setup.syncGptSubagentModel(), /Settings/);
+    assert.equal(f.state.catalogs, 0);
     assert.equal(fs.readFileSync(f.settingsFile, "utf8"), value);
   });
 }
@@ -83,16 +288,20 @@ test("rejects symlink, directory, readonly targets and linked private backup roo
   // A directory Junction also exercises the unsafe-settings path without Windows symlink privileges.
   fs.symlinkSync(process.platform === "win32" ? f.root : original, f.settingsFile, process.platform === "win32" ? "junction" : "file");
   await assert.rejects(f.setup.configureCli(), /Settings/);
+  await assert.rejects(f.setup.syncGptSubagentModel(), /Settings/);
   fs.unlinkSync(f.settingsFile); fs.mkdirSync(f.settingsFile);
   await assert.rejects(f.setup.configureCli(), /Settings/);
+  await assert.rejects(f.setup.syncGptSubagentModel(), /Settings/);
   fs.rmdirSync(f.settingsFile); f.write({});
   if (process.platform !== "win32") {
     fs.chmodSync(f.settingsFile, 0o400);
     await assert.rejects(f.setup.configureCli(), /Settings/);
+    await assert.rejects(f.setup.syncGptSubagentModel(), /Settings/);
     fs.chmodSync(f.settingsFile, 0o600);
   }
   fs.symlinkSync(f.root, path.join(f.root, "claude-proxy"), process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(f.setup.configureCli(), /Settings/);
+  await assert.rejects(f.setup.syncGptSubagentModel(), /Settings/);
   assert.equal(fs.readFileSync(original, "utf8"), "{}");
 });
 

@@ -3,6 +3,147 @@ const assert = require("node:assert/strict");
 const { createModelDiscovery } = require("../lib/model-discovery");
 
 const ok = (data) => ({ ok: true, json: async () => data });
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+for (const options of [undefined, { waitForRefresh: false }]) {
+  test(`discovery keeps the 2.2s empty fallback with ${JSON.stringify(options)} options`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let calls = 0;
+    const getModels = createModelDiscovery({
+      loadAuth: async () => ({ kind: "api", token: "fixture" }),
+      loadClaudeAuth: async () => { throw new Error("no Copilot fixture"); },
+      fetchImpl: async () => {
+        calls++;
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        return ok({ data: [{ id: "gpt-5.4" }] });
+      }
+    });
+    let result;
+    const reply = getModels(options).then((value) => { result = value; });
+    await flush();
+    t.mock.timers.tick(2199);
+    await flush();
+    assert.equal(result, undefined);
+    t.mock.timers.tick(1);
+    await reply;
+    assert.deepEqual(result, { object: "list", data: [] });
+    t.mock.timers.tick(2800);
+    await flush();
+    const refreshed = await getModels({ waitForRefresh: true });
+    assert.deepEqual(refreshed.data.map((model) => model.id), ["gpt-5.4"]);
+    assert.strictEqual(await getModels(), refreshed);
+    assert.equal(calls, 1);
+  });
+}
+
+test("waitForRefresh waits beyond the reply deadline and coalesces mixed callers", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const getModels = createModelDiscovery({
+    loadAuth: async () => ({ kind: "api", token: "fixture" }),
+    loadClaudeAuth: async () => ({ token: "fixture", baseUrl: "https://api.business.githubcopilot.com" }),
+    fetchImpl: async (url) => {
+      calls++;
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      return ok({ data: url.includes("githubcopilot.com")
+        ? [{ id: "claude-sonnet-4", model_picker_enabled: true }] : [{ id: "gpt-5.4" }] });
+    }
+  });
+  let refreshed;
+  const waiting = getModels({ waitForRefresh: true }).then((value) => { refreshed = value; return value; });
+  const ordinary = getModels();
+  const explicitDefault = getModels({ waitForRefresh: false });
+  await flush();
+  t.mock.timers.tick(2200);
+  await flush();
+  assert.deepEqual(await ordinary, { object: "list", data: [] });
+  assert.deepEqual(await explicitDefault, { object: "list", data: [] });
+  assert.equal(refreshed, undefined);
+  const joined = getModels({ waitForRefresh: true });
+  t.mock.timers.tick(2799);
+  await flush();
+  assert.equal(refreshed, undefined);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.ok(refreshed);
+  assert.strictEqual(await joined, await waiting);
+  assert.deepEqual(refreshed.data.map((model) => model.id), ["gpt-5.4", "claude-sonnet-4"]);
+  assert.strictEqual(await getModels({ waitForRefresh: true }), refreshed);
+  assert.equal(calls, 2);
+});
+
+test("default discovery returns stale cache while waitForRefresh awaits its refresh", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  let calls = 0;
+  const getModels = createModelDiscovery({
+    now: () => clock,
+    loadAuth: async () => ({ kind: "api", token: "fixture" }),
+    loadClaudeAuth: async () => { throw new Error("no Copilot fixture"); },
+    fetchImpl: async () => {
+      const index = ++calls;
+      if (index > 1) await new Promise((resolve) => setTimeout(resolve, 5000));
+      return ok({ data: [{ id: `gpt-${index}.4` }] });
+    }
+  });
+  const initial = await getModels({ waitForRefresh: true });
+  assert.strictEqual(await getModels({ waitForRefresh: true }), initial);
+  assert.equal(calls, 1);
+  clock = 30001;
+  let refreshed;
+  const ordinary = getModels();
+  const waiting = getModels({ waitForRefresh: true }).then((value) => { refreshed = value; });
+  await flush();
+  t.mock.timers.tick(2200);
+  await flush();
+  assert.strictEqual(await ordinary, initial);
+  assert.equal(refreshed, undefined);
+  t.mock.timers.tick(2800);
+  await flush();
+  assert.ok(refreshed);
+  await waiting;
+  assert.deepEqual(refreshed.data.map((model) => model.id), ["gpt-2.4"]);
+  assert.equal(calls, 2);
+});
+
+for (const allUnavailable of [false, true]) {
+  test(`waitForRefresh shares the original 12s upstream timeout (${allUnavailable ? "all unavailable" : "partial catalog"})`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const signals = [];
+    const warnings = [];
+    const getModels = createModelDiscovery({
+      onWarning: (source, message) => warnings.push([source, message]),
+      loadAuth: async () => ({ kind: "api", token: "fixture" }),
+      loadClaudeAuth: async () => ({ token: "fixture", baseUrl: "https://api.business.githubcopilot.com" }),
+      fetchImpl: async (url, { signal }) => {
+        signals.push(signal);
+        if (!allUnavailable && !url.includes("githubcopilot.com")) return ok({ data: [{ id: "gpt-5.4" }] });
+        return new Promise(() => {}); // Ignore abort to exercise the discovery deadline itself.
+      }
+    });
+    let result;
+    const waiting = getModels({ waitForRefresh: true }).then((value) => { result = value; return value; });
+    await flush();
+    t.mock.timers.tick(5000);
+    await flush();
+    assert.equal(result, undefined);
+    const joined = getModels({ waitForRefresh: true });
+    t.mock.timers.tick(6999);
+    await flush();
+    assert.equal(result, undefined);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.ok(result);
+    assert.strictEqual(await joined, await waiting);
+    assert.deepEqual(result.data.map((model) => model.id), allUnavailable ? [] : ["gpt-5.4"]);
+    assert.equal(signals.length, 2);
+    assert.ok(signals.every((signal) => signal.aborted));
+    assert.deepEqual(warnings, (allUnavailable ? ["OpenAI Responses", "GitHub Copilot"] : ["GitHub Copilot"])
+      .map((source) => [source, "Model discovery timed out"]));
+    assert.strictEqual(await getModels({ waitForRefresh: true }), result);
+    assert.equal(signals.length, 2);
+  });
+}
 
 test("invalidation refreshes immediately and an older pending catalog cannot restore stale cache", async () => {
   let release;

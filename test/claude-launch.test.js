@@ -1,6 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const http = require("node:http");
 const path = require("node:path");
 const { buildLaunch, main } = require("../lib/claude-launch");
 const { createSetupProbe } = require("../lib/claude-probes");
@@ -11,6 +14,21 @@ const catalog = { data: [
   { id: "claude-opus-4.8", context_window: 1000000 },
   { id: "claude-haiku-4.5", context_window: 200000 }
 ] };
+
+test("ordinary settings-selected launches use the shared valid GPT window without selecting a model", () => {
+  const args = ["--settings", "private settings.json", "--setting-sources", "user,project", "-p", "hello", "--", "--model=gpt-small"];
+  const env = { KEEP: "yes" };
+  const launch = buildLaunch(catalog, args, env);
+  assert.deepEqual(launch.args, args);
+  assert.deepEqual(launch.env, { KEEP: "yes", CLAUDE_CODE_MAX_CONTEXT_TOKENS: "400000" });
+  assert.deepEqual(env, { KEEP: "yes" });
+  assert.equal(buildLaunch(catalog, [], { CLAUDE_CODE_MAX_CONTEXT_TOKENS: "123456" }).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "123456");
+  const mixed = { data: [...catalog.data, { id: "gpt-invalid", context_window: "100" }] };
+  assert.equal(buildLaunch(mixed, [], {}).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "400000");
+  for (const data of [[{ id: "gpt-invalid" }], [{ id: "claude-opus-4.8", context_window: 1000000 }]]) {
+    assert.deepEqual(buildLaunch({ data }, [], {}).env, {});
+  }
+});
 
 test("a stale gateway GPT ID launches under its raw ID without injecting settings", () => {
   const launch = buildLaunch(catalog, ["-p", "hi"], { ANTHROPIC_MODEL: "claude-gateway/gpt-6.1-sol[1m]" });
@@ -73,6 +91,108 @@ test("catalog failures preserve original arguments and spawn errors are reported
     } }), 1);
 });
 
+test("non-session commands bypass catalog discovery and preserve all arguments and environment", async () => {
+  for (const args of [["--version"], ["-v"], ["--help"], ["-h"], ["update"], ["upgrade"], ["auth", "status"],
+    ["mcp", "list"], ["plugin", "list"], ["doctor"], ["install", "latest"], ["--settings", "private.json", "update"]]) {
+    const env = { ANTHROPIC_MODEL: "gpt-small", KEEP: "yes" };
+    let fetched = 0;
+    assert.deepEqual(buildLaunch(catalog, args, env), { args, env, warnings: [] });
+    assert.equal(await main({ args, env,
+      fetchImpl: async () => { fetched++; throw new Error("unexpected catalog request"); },
+      probe: async () => ({ claudeCommand: { file: "cli", args: [] } }),
+      spawnImpl: (file, actual, options) => {
+        assert.deepEqual(actual, args);
+        assert.deepEqual(options.env, env);
+        assert.equal(options.stdio, "inherit");
+        assert.equal(options.shell, false);
+        const child = new EventEmitter();
+        process.nextTick(() => child.emit("exit", 7));
+        return child;
+      } }), 7);
+    assert.equal(fetched, 0, "non-session command must not fetch models");
+  }
+  // Help-like text and command names used as option values or prompts are not subcommands.
+  for (const args of [["--system-prompt", "--help", "-p", "hi"], ["--settings", "update", "-p", "hi"],
+    ["-p", "update"], ["--", "update"], ["hello", "--version"]]) {
+    assert.equal(buildLaunch(catalog, args, {}).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "400000");
+  }
+});
+
+test("catalog HTTP, JSON and timeout failures warn but still start the original CLI", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (message) => warnings.push(message));
+  for (const response of [() => ({ ok: false }), () => ({ ok: true, json: async () => { throw new SyntaxError("invalid JSON"); } }),
+    () => { throw new DOMException("timed out", "TimeoutError"); }]) {
+    const args = ["--model", "gpt-small", "-p", "hello"];
+    const env = { CLAUDE_CODE_MAX_CONTEXT_TOKENS: "123456" };
+    const before = process.listenerCount("SIGINT");
+    assert.equal(await main({ args, env, fetchImpl: async (url, options) => {
+      assert.equal(url, "http://localhost:8082/v1/models");
+      assert.ok(options.signal instanceof AbortSignal);
+      return response();
+    }, probe: async () => ({ claudeCommand: { file: "cli", args: [] } }),
+    spawnImpl: (file, actual, options) => {
+      assert.deepEqual(actual, args);
+      assert.deepEqual(options.env, env);
+      assert.equal(process.listenerCount("SIGINT"), before + 1);
+      const child = new EventEmitter();
+      process.nextTick(() => child.emit("exit", 4));
+      return child;
+    } }), 4);
+    assert.equal(process.listenerCount("SIGINT"), before);
+  }
+  assert.equal(warnings.length, 3);
+  assert.ok(warnings.every((message) => /model catalog unavailable/.test(message)));
+});
+
+test("invalid catalogs warn and fall back to the original CLI context", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (message) => warnings.push(message));
+  for (const body of [null, {}, { data: null }, { data: [] }, { data: [null] }, { data: [{}] }]) {
+    const args = ["-p", "hello"];
+    const env = { KEEP: "yes" };
+    assert.equal(await main({ args, env, fetchImpl: async () => ({ ok: true, json: async () => body }),
+      probe: async () => ({ claudeCommand: { file: "cli", args: [] } }),
+      spawnImpl: (file, actual, options) => {
+        assert.deepEqual(actual, args);
+        assert.deepEqual(options.env, env);
+        const child = new EventEmitter();
+        process.nextTick(() => child.emit("exit", 0));
+        return child;
+      } }), 0);
+  }
+  assert.equal(warnings.length, 6);
+  assert.ok(warnings.every((message) => /model catalog unavailable/.test(message)));
+});
+
+test("successive launches fetch changing catalog capacities for real child processes", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "claude-launch-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fixture = path.join(directory, "fake cli.cjs");
+  const output = path.join(directory, "result.json");
+  fs.writeFileSync(fixture, 'require("node:fs").writeFileSync(process.env.RESULT_FILE, JSON.stringify({ tokens: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, args: process.argv.slice(2), cwd: process.cwd(), config: process.env.CLAUDE_CONFIG_DIR })); process.exitCode = 9;');
+  let capacity = 500000;
+  let fetched = 0;
+  const server = http.createServer((request, response) => {
+    assert.equal(request.url, "/v1/models");
+    fetched++;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: [{ id: "anthropic/gpt-test", context_window: capacity }] }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const args = ["--settings", "not read.json", "-p", "original prompt", "--", "--model=gpt-test"];
+  const env = { ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}/`, CLAUDE_CONFIG_DIR: directory, RESULT_FILE: output };
+  for (const nextCapacity of [500000, 700000]) {
+    capacity = nextCapacity;
+    assert.equal(await main({ args, env, probe: async () => ({ claudeCommand: { file: process.execPath, args: [fixture] } }) }), 9);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), {
+      tokens: String(capacity), args, cwd: process.cwd(), config: directory
+    });
+  }
+  assert.equal(fetched, 2);
+});
+
 test("native and npm probes return shell-free launch commands", async () => {
   for (const native of [true, false]) {
     const cli = path.win32.join("C:/npm", "node_modules/@anthropic-ai/claude-code/cli.js");
@@ -99,6 +219,13 @@ test("unknown or invalid selected GPT capacity never borrows another model's lim
     assert.equal(buildLaunch(models, ["--model", "gpt-not-listed"], {}).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
     assert.equal(buildLaunch(models, ["--model", "gpt-small"], { CLAUDE_CODE_MAX_CONTEXT_TOKENS: "300000" })
       .env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "300000");
+  }
+});
+
+test("an explicit Claude selection without valid capacity does not borrow the shared GPT limit", () => {
+  const models = { data: [{ id: "claude-test" }, { id: "gpt-test", context_window: 500000 }] };
+  for (const [args, env] of [[["--model", "claude-test"], {}], [[], { ANTHROPIC_MODEL: "claude-test" }]]) {
+    assert.equal(buildLaunch(models, args, env).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
   }
 });
 

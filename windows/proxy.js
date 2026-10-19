@@ -15,6 +15,7 @@ const { createAuthRouter } = require("../lib/auth-server");
 const { createClaudeSetup, getClaudeConfigRoot } = require("../lib/claude-setup");
 const { createMacosService } = require("../lib/macos-service");
 const { createProjectMemoryInstaller } = require("../lib/project-memory-install");
+const { createClaudeLauncherInstaller } = require("../lib/claude-launcher-install");
 const { createCodingDisciplineInstaller } = require("../lib/coding-discipline-install");
 const { createProjectMemoryGateway } = require("../lib/project-memory-gateway");
 const { createProjectMemoryMaintainer } = require("../lib/project-memory-maintainer");
@@ -89,7 +90,7 @@ function getClaudeSettingsPath() {
 }
 
 function syncClaudeSettings() {
-  // Startup deliberately leaves personal settings untouched.
+  // Legacy import boundary stays inert; GPT-only sync runs after listening succeeds.
 }
 
 function getSettingsPaths() { return [getClaudeSettingsPath()]; }
@@ -954,13 +955,15 @@ async function answerWebSearch(anthropicBody, search, model, requestId, res) {
 
 const macosService = createMacosService({ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy });
 const projectMemoryInstaller = createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() });
+const claudeLauncherInstaller = createClaudeLauncherInstaller();
+const claudeSetup = createClaudeSetup({ store: credentialStore, getAvailableModels });
 const authRouter = createAuthRouter({
   port: PORT,
   macosService,
   projectMemory: projectMemoryInstaller,
   codingDiscipline: createCodingDisciplineInstaller({ configRoot: getClaudeConfigRoot() }),
   store: credentialStore,
-  setup: createClaudeSetup({ store: credentialStore, getAvailableModels }),
+  setup: claudeSetup,
   summarySettings: createSummarySettings({ getDefaultModel: summaryModel.getDefaultModel, listModels: summaryModel.listModels,
     defaultPrompt: DEFAULT_SUMMARY_PROMPT }),
   onCredentialsChanged: () => getAvailableModels.invalidate()
@@ -1154,4 +1157,11 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`claude-proxy running on http://127.0.0.1:${PORT}`);
   console.log(`本地登录页面：http://127.0.0.1:${PORT}/login`);
   console.log(`凭据存储目录：${credentialStore.directory}`);
+  // 仅在监听成功后异步同步 GPT 子代理默认模型；失败保留原配置，不输出可能包含凭据的错误。
+  claudeSetup.syncGptSubagentModel().catch(() => logWarn("claude-setup", "GPT subagent model sync failed; existing settings were kept. Retry on next proxy startup."));
+  // 仅在监听成功后、不阻塞启动地检查 zsh 启动器；显式关闭、配置不安全或平台不支持时不安装。
+  claudeLauncherInstaller.autoEnable().then((result) => {
+    if (result?.ok === false) logWarn("claude-launcher", "Claude launcher automatic setup failed", { reason: result.reason });
+    else if (result) logEvent("claude-launcher", "Claude launcher automatic setup", { changed: result.changed, enabled: result.enabled, state: result.state });
+  }).catch((error) => logWarn("claude-launcher", "Claude launcher automatic setup failed", { reason: error && error.message }));
 });
