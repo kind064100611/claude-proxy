@@ -5,7 +5,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const http = require("node:http");
 const path = require("node:path");
-const { buildLaunch, main } = require("../lib/claude-launch");
+const { buildLaunch, main: launchMain } = require("../lib/claude-launch");
+const signedInStore = { readAuth: () => ({ openai: { type: "api_key", key: "test-key" } }) };
+const main = (options) => launchMain({ store: signedInStore, ...options });
 const { createSetupProbe } = require("../lib/claude-probes");
 
 const catalog = { data: [
@@ -96,8 +98,10 @@ test("non-session commands bypass catalog discovery and preserve all arguments a
     ["mcp", "list"], ["plugin", "list"], ["doctor"], ["install", "latest"], ["--settings", "private.json", "update"]]) {
     const env = { ANTHROPIC_MODEL: "gpt-small", KEEP: "yes" };
     let fetched = 0;
+    let authReads = 0;
     assert.deepEqual(buildLaunch(catalog, args, env), { args, env, warnings: [] });
     assert.equal(await main({ args, env,
+      store: { readAuth() { authReads++; throw new Error("must not read auth"); } },
       fetchImpl: async () => { fetched++; throw new Error("unexpected catalog request"); },
       probe: async () => ({ claudeCommand: { file: "cli", args: [] } }),
       spawnImpl: (file, actual, options) => {
@@ -110,6 +114,7 @@ test("non-session commands bypass catalog discovery and preserve all arguments a
         return child;
       } }), 7);
     assert.equal(fetched, 0, "non-session command must not fetch models");
+    assert.equal(authReads, 0, "non-session command must not read auth");
   }
   // Help-like text and command names used as option values or prompts are not subcommands.
   for (const args of [["--system-prompt", "--help", "-p", "hi"], ["--settings", "update", "-p", "hi"],
@@ -191,6 +196,111 @@ test("successive launches fetch changing catalog capacities for real child proce
     });
   }
   assert.equal(fetched, 2);
+});
+
+test("signed-in sessions adopt catalog arguments, capacity and warnings after a final read-only check", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (message) => warnings.push(message));
+  for (const provider of ["openai", "openai-codex", "environment"]) {
+    const args = ["--model=anthropic/gpt-small[1m]", "-p", "hello"];
+    const env = provider === "environment" ? { OPENAI_API_KEY: "test-key" } : {};
+    let reads = 0;
+    let probed = false;
+    assert.equal(await main({ args, env,
+      store: { readAuth(options) {
+        assert.deepEqual(options, { readOnly: true });
+        reads++;
+        if (reads === 2) assert.equal(probed, true);
+        return provider === "environment" ? {} : { [provider]: { type: "oauth", access: "access", refresh: "refresh", expires: 0 } };
+      } },
+      fetchImpl: async () => ({ ok: true, json: async () => catalog }),
+      probe: async () => { probed = true; return { claudeCommand: { file: "cli", args: [] } }; },
+      spawnImpl: (file, actual, options) => {
+        assert.equal(reads, 2);
+        assert.deepEqual(actual, ["--model", "gpt-small", "-p", "hello"]);
+        assert.deepEqual(options.env, { ...env, CLAUDE_CODE_MAX_CONTEXT_TOKENS: "400000" });
+        const child = new EventEmitter();
+        process.nextTick(() => child.emit("exit", 0));
+        return child;
+      } }), 0);
+    assert.equal(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+  }
+  assert.equal(warnings.length, 3);
+  assert.ok(warnings.every((message) => /\/model does not update/.test(message)));
+});
+
+test("signed-out sessions never fetch even a cached GPT catalog and preserve caller context", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (message) => warnings.push(message));
+  for (const auth of [{}, { "github-copilot": { type: "oauth", access: "access", refresh: "refresh", expires: 0 } },
+    { openai: { type: "api_key", key: " " } }, null]) {
+    for (const limit of [undefined, "123456"]) {
+      const args = ["--model=anthropic/gpt-small[1m]", "-p", "hello"];
+      const env = { ANTHROPIC_MODEL: "claude-opus-4.8", KEEP: "yes",
+        ...(limit ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: limit } : {}) };
+      let fetched = 0;
+      assert.equal(await main({ args, env,
+        store: { readAuth(options) {
+          assert.deepEqual(options, { readOnly: true });
+          if (auth === null) throw new Error("private-storage-detail");
+          return auth;
+        } },
+        fetchImpl: async () => { fetched++; return { ok: true, json: async () => catalog }; },
+        probe: async () => ({ claudeCommand: { file: "cli", args: [] } }),
+        spawnImpl: (file, actual, options) => {
+          assert.strictEqual(actual.length, args.length);
+          assert.deepEqual(actual, args);
+          assert.strictEqual(options.env, env);
+          const child = new EventEmitter();
+          process.nextTick(() => child.emit("exit", 0));
+          return child;
+        } }), 0);
+      assert.equal(fetched, 0);
+    }
+  }
+  assert.deepEqual(warnings, []);
+});
+
+test("logout during catalog fetch, JSON or CLI probing discards derived arguments, context and warnings", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (message) => warnings.push(message));
+  for (const stage of ["fetch", "json", "probe", "catalog-error"]) {
+    for (const [brokenStore, limit] of [[false, undefined], [false, "123456"], [true, undefined], [true, "123456"]]) {
+      let signedIn = true;
+      let reads = 0;
+      const args = ["--model=anthropic/gpt-small[1m]", "-p", "hello"];
+      const env = { KEEP: "yes", ...(limit ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: limit } : {}) };
+      const logout = async () => { await Promise.resolve(); signedIn = false; };
+      assert.equal(await main({ args, env,
+        store: { readAuth(options) {
+          reads++;
+          assert.deepEqual(options, { readOnly: true });
+          if (!signedIn && brokenStore) throw new Error("private-storage-detail");
+          return signedIn ? signedInStore.readAuth() : {};
+        } },
+        fetchImpl: async () => {
+          if (stage === "fetch" || stage === "catalog-error") await logout();
+          if (stage === "catalog-error") throw new Error("offline");
+          return { ok: true, json: async () => {
+            if (stage === "json") await logout();
+            return catalog;
+          } };
+        },
+        probe: async () => {
+          if (stage === "probe") await logout();
+          return { claudeCommand: { file: "cli", args: [] } };
+        },
+        spawnImpl: (file, actual, options) => {
+          assert.deepEqual(actual, args);
+          assert.strictEqual(options.env, env);
+          const child = new EventEmitter();
+          process.nextTick(() => child.emit("exit", 0));
+          return child;
+        } }), 0);
+      assert.equal(reads, 2, "credentials must be rechecked after all async operations");
+    }
+  }
+  assert.deepEqual(warnings, []);
 });
 
 test("native and npm probes return shell-free launch commands", async () => {

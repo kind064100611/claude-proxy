@@ -46,7 +46,7 @@ function startProxy(platform, root, { installer, installerFactory, listen = "suc
         calls.factory++;
         calls.factoryArgs = args;
         if (calls.listening === false) calls.factoryBeforeListen = true;
-        return installerFactory ? installerFactory() : { autoEnable: async () => {
+        return installerFactory ? installerFactory(...args) : { autoEnable: async () => {
           calls.autoEnable++;
           if (!calls.listening) calls.autoEnableBeforeListen++;
           return installer ? installer() : null;
@@ -86,7 +86,7 @@ function startProxy(platform, root, { installer, installerFactory, listen = "suc
     console: { log: (...args) => logs.push(args.join(" ")), warn: (...args) => warns.push(args.join(" ")), error() {} }
   };
   vm.runInNewContext(fs.readFileSync(filename, "utf8"), context, { filename });
-  return { server, calls, logs, warns, fakeProcess, featureFile, configRoot };
+  return { server, calls, logs, warns, fakeProcess, featureFile, configRoot, store };
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -97,7 +97,9 @@ for (const platform of ["mac", "windows"]) {
     const run = startProxy(platform, root, { listen: "manual", installer: () => ({ ok: true, changed: true, enabled: true, state: "installed" }) });
     await tick();
     assert.equal(run.calls.factory, 1);
-    assert.deepEqual(run.calls.factoryArgs, []);
+    assert.equal(run.calls.factoryArgs.length, 1);
+    assert.equal(run.calls.factoryArgs[0].store, run.store);
+    assert.deepEqual(Object.keys(run.calls.factoryArgs[0]), ["store"]);
     assert.equal(run.calls.autoEnable, 0);
     run.server.listenCallback();
     assert.equal(run.calls.autoEnable, 1);
@@ -271,6 +273,30 @@ for (const platform of ["mac", "windows"]) {
   });
 }
 
+for (const platform of ["mac", "windows"]) {
+  test(`${platform} startup without GPT credentials skips the real launcher without accessing shell or feature files`, async (t) => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proxy-startup-")));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    let pending;
+    let accesses = 0;
+    const run = startProxy(platform, root, { installerFactory: (options) => {
+      const installer = require(LAUNCHER_MODULE).createClaudeLauncherInstaller({ ...options, home: root,
+        configRoot: path.join(root, "config"), featureFile: path.join(root, "features.json"), env: {}, platform: "darwin",
+        fsImpl: new Proxy({}, { get() { accesses++; throw new Error("unexpected installer filesystem access"); } }),
+        execFileSync() { accesses++; throw new Error("unexpected shell access"); } });
+      return { ...installer, autoEnable: () => (pending = installer.autoEnable()) };
+    } });
+    assert.equal(await pending, null);
+    await tick();
+    assert.equal(accesses, 0);
+    assert.equal(run.calls.factoryArgs[0].store, run.store);
+    assert.equal(run.warns.some((line) => line.includes("claude-launcher")), false);
+    assert.equal(fs.existsSync(path.join(root, ".zshrc")), false);
+    assert.equal(fs.existsSync(run.featureFile), false);
+    assert.equal(fs.existsSync(path.join(run.configRoot, "claude-proxy", "zsh-backups")), false);
+  });
+}
+
 test("real launcher installer in a temp home enables once, then leaves everything unchanged, and never overrides an explicit false", async (t) => {
   const installerModule = require(LAUNCHER_MODULE);
   if (!fs.existsSync("/bin/zsh")) return t.skip("zsh unavailable");
@@ -282,23 +308,37 @@ test("real launcher installer in a temp home enables once, then leaves everythin
   const zshrc = path.join(home, ".zshrc");
   fs.writeFileSync(zshrc, "export KEEP=1\n");
   fs.writeFileSync(featureFile, '{"version":1,"onlineSummary":false}\n');
-  const installerFactory = () => installerModule.createClaudeLauncherInstaller({ home, configRoot: path.join(root, "config"), featureFile, env: {}, platform: "darwin" });
-  const first = startProxy("mac", root, { installerFactory });
-  for (let index = 0; index < 50 && !first.logs.some((line) => line.includes("claude-launcher")); index++) await new Promise((r) => setTimeout(r, 20));
+  const auth = { openai: { type: "api_key", key: "test-startup-key" } };
+  let pending;
+  const installerFactory = (options) => {
+    const installer = installerModule.createClaudeLauncherInstaller({ ...options, home, configRoot: path.join(root, "config"), featureFile, env: {}, platform: "darwin" });
+    return { ...installer, autoEnable: () => (pending = installer.autoEnable()) };
+  };
+  const first = startProxy("mac", root, { installerFactory, auth });
+  await pending;
+  assert.equal(first.calls.factoryArgs[0].store, first.store);
   const enabled = JSON.parse(fs.readFileSync(featureFile, "utf8"));
   assert.equal(enabled.claudeLauncher, true);
   assert.equal(enabled.onlineSummary, false);
   const installed = fs.readFileSync(zshrc);
   assert.match(installed.toString(), /claude-proxy capacity launcher/);
   const featureBytes = fs.readFileSync(featureFile);
-  const second = startProxy("mac", root, { installerFactory });
-  for (let index = 0; index < 50 && !second.logs.some((line) => line.includes("claude-launcher")); index++) await new Promise((r) => setTimeout(r, 20));
+  const second = startProxy("mac", root, { installerFactory, auth });
+  await pending;
+  assert.equal(second.calls.factoryArgs[0].store, second.store);
   assert.deepEqual(fs.readFileSync(zshrc), installed);
   assert.deepEqual(fs.readFileSync(featureFile), featureBytes);
+  const backups = path.join(root, "config", "claude-proxy", "zsh-backups");
+  const names = fs.readdirSync(backups);
+  startProxy("mac", root, { installerFactory });
+  assert.equal(await pending, null);
+  assert.deepEqual(fs.readFileSync(zshrc), installed);
+  assert.deepEqual(fs.readFileSync(featureFile), featureBytes);
+  assert.deepEqual(fs.readdirSync(backups), names);
   fs.writeFileSync(zshrc, "export KEEP=1\n");
   fs.writeFileSync(featureFile, '{"version":1,"claudeLauncher":false}\n');
-  const third = startProxy("mac", root, { installerFactory });
-  await new Promise((r) => setTimeout(r, 200));
+  const third = startProxy("mac", root, { installerFactory, auth });
+  assert.equal(await pending, null);
   assert.equal(fs.readFileSync(zshrc, "utf8"), "export KEEP=1\n");
   assert.equal(fs.readFileSync(featureFile, "utf8"), '{"version":1,"claudeLauncher":false}\n');
   assert.equal(third.warns.some((line) => line.includes("claude-launcher")), false);

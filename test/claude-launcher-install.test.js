@@ -12,6 +12,7 @@ const { getStatus, setFeatures } = require("../lib/online-summary");
 const START = "# >>> claude-proxy capacity launcher >>>";
 const END = "# <<< claude-proxy capacity launcher <<<";
 const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
+const signedInStore = { readAuth: () => ({ openai: { type: "api_key", key: "test-gpt-key" } }) };
 function block(node, launcher, eol = "\n") {
   return [START, "claude() {", "  local node_command",
     `  node_command="$(whence -p node)" || node_command=${quote(node)}`,
@@ -24,7 +25,7 @@ function fixture(t, options = {}) {
   const featureFile = path.join(home, "features.json");
   const target = path.join(home, ".zshrc");
   const launcher = path.resolve(__dirname, "../lib/claude-launch.js");
-  const installer = createClaudeLauncherInstaller({ home, configRoot, featureFile, env: {}, platform: "darwin", ...options });
+  const installer = createClaudeLauncherInstaller({ home, configRoot, featureFile, env: {}, store: signedInStore, platform: "darwin", ...options });
   const backups = () => {
     const directory = path.join(configRoot, "claude-proxy/zsh-backups");
     return fs.existsSync(directory) ? fs.readdirSync(directory).map((name) => path.join(directory, name)) : [];
@@ -96,16 +97,93 @@ test("only exact stale templates are updated; disable keeps later user configura
   assert.equal(features.projectMemory, true);
 });
 
-test("unsupported platforms and shell configurations skip before touching any files", async () => {
+test("unsupported platforms and shell configurations skip before touching any files or credentials", async () => {
   const fsImpl = new Proxy({}, { get() { throw new Error("must not access fs"); } });
+  let credentialReads = 0;
+  const store = { readAuth() { credentialReads++; throw new Error("must not read credentials"); } };
   for (const options of [{ platform: "win32" }, { platform: "linux" },
     { platform: "darwin", env: { SHELL: "/bin/bash" } },
     { platform: "darwin", env: { ZDOTDIR: "/custom/zsh" } }]) {
-    const installer = createClaudeLauncherInstaller({ home: "/test/home", fsImpl, ...options });
+    const installer = createClaudeLauncherInstaller({ home: "/test/home", env: {}, fsImpl, store, ...options });
     assert.equal(await installer.autoEnable(), null);
     assert.equal((await installer.getStatus()).state, "skipped");
     assert.equal(await installer.configure(true), null);
   }
+  assert.equal(credentialReads, 0);
+});
+
+test("automatic installation without GPT credentials never accesses shell, features or backups", async () => {
+  const oauth = { type: "oauth", access: "copilot", refresh: "refresh", expires: 1 };
+  for (const auth of [{}, { "github-copilot": oauth }, new Error("private credential error")]) {
+    let reads = 0;
+    let fileAccesses = 0;
+    let shellCalls = 0;
+    const warnings = [];
+    const store = { readAuth(options) {
+      reads++;
+      assert.deepEqual(options, { readOnly: true });
+      if (auth instanceof Error) throw auth;
+      return auth;
+    } };
+    const fsImpl = new Proxy({}, { get() { fileAccesses++; throw new Error("must not access fs"); } });
+    const installer = createClaudeLauncherInstaller({ home: "/test/home", platform: "darwin", env: {}, store, fsImpl,
+      execFileSync() { shellCalls++; throw new Error("must not execute shell"); },
+      onWarning: (message) => warnings.push(message) });
+    assert.equal(await installer.autoEnable(), null);
+    assert.equal(reads, 1);
+    assert.equal(fileAccesses, 0);
+    assert.equal(shellCalls, 0);
+    assert.deepEqual(warnings, []);
+  }
+});
+
+test("OPENAI_API_KEY permits automatic installation without stored GPT credentials", async (t) => {
+  const f = fixture(t, { env: { OPENAI_API_KEY: "test-env-key" }, store: { readAuth: () => ({}) } });
+  assert.equal((await f.installer.autoEnable()).ok, true);
+  assert.equal(getStatus(f.featureFile).claudeLauncher, true);
+});
+
+test("automatic installation checks credentials only after earlier queued work finishes", async (t) => {
+  let auth = { openai: { type: "api_key", key: "test-key" } };
+  let reads = 0;
+  const f = fixture(t, { store: { readAuth() { reads++; return auth; } }, execFileSync(command, args) {
+    if (args[0] === "--version") {
+      auth = {};
+      return process.version;
+    }
+  } });
+  const install = f.installer.configure(true);
+  const automatic = f.installer.autoEnable();
+  assert.equal(reads, 0);
+  assert.equal((await install).ok, true);
+  assert.equal(await automatic, null);
+  assert.equal(reads, 1);
+  assert.equal(fs.readFileSync(f.target, "utf8"), block(process.execPath, f.launcher));
+});
+
+test("logout preserves an installed launcher and feature state but does not prevent manual disable", async (t) => {
+  let auth = { openai: { type: "api_key", key: "test-key" } };
+  let reads = 0;
+  const f = fixture(t, { store: { readAuth() { reads++; return auth; } } });
+  fs.writeFileSync(f.target, "# user config\n");
+  assert.equal((await f.installer.autoEnable()).ok, true);
+  const installed = fs.readFileSync(f.target);
+  const feature = fs.readFileSync(f.featureFile);
+  const backups = f.backups();
+  const shellInfo = fs.statSync(f.target);
+  const featureInfo = fs.statSync(f.featureFile);
+  auth = {};
+  assert.equal(await f.installer.autoEnable(), null);
+  assert.deepEqual(fs.readFileSync(f.target), installed);
+  assert.deepEqual(fs.readFileSync(f.featureFile), feature);
+  assert.equal(fs.statSync(f.target).ino, shellInfo.ino);
+  assert.equal(fs.statSync(f.featureFile).ino, featureInfo.ino);
+  assert.deepEqual(f.backups(), backups);
+  assert.equal(reads, 2);
+  assert.equal((await f.installer.configure(false)).ok, true);
+  assert.equal(reads, 2);
+  assert.equal(fs.readFileSync(f.target, "utf8"), "# user config\n");
+  assert.equal(getStatus(f.featureFile).claudeLauncher, false);
 });
 
 test("importing the installer is inert even with maintenance arguments", (t) => {
@@ -156,7 +234,7 @@ test("construction is inert and status never writes or executes the shell", asyn
     return target[name];
   } });
   const installer = createClaudeLauncherInstaller({ home: f.home, configRoot: f.configRoot,
-    featureFile: f.featureFile, platform: "darwin", env: {}, fsImpl,
+    featureFile: f.featureFile, platform: "darwin", env: {}, store: signedInStore, fsImpl,
     execFileSync() { throw new Error("status must not execute"); } });
   assert.equal((await installer.getStatus()).state, "absent");
   assert.deepEqual(fs.readdirSync(f.home), []);
@@ -230,7 +308,7 @@ test("symlinks, directories, wrong ownership and unwritable files are preserved"
       return target[name];
     } });
     const installer = createClaudeLauncherInstaller({ home: f.home, configRoot: f.configRoot,
-      featureFile: f.featureFile, platform: "darwin", env: {}, fsImpl });
+      featureFile: f.featureFile, platform: "darwin", env: {}, store: signedInStore, fsImpl });
     assert.equal((await installer.autoEnable()).ok, false);
     assert.equal(fs.readFileSync(original, "utf8"), "# original\n");
     assert.equal(f.backups().length, 0);
@@ -269,7 +347,7 @@ test("spaces and quotes are escaped, arguments survive, and Node fallback works 
   const nodePath = path.join(f.home, "node ' fallback");
   fs.symlinkSync(process.execPath, nodePath);
   const installer = createClaudeLauncherInstaller({ home: f.home, configRoot: f.configRoot,
-    featureFile: f.featureFile, env: {}, platform: "darwin", repoRoot, nodePath });
+    featureFile: f.featureFile, env: {}, store: signedInStore, platform: "darwin", repoRoot, nodePath });
   assert.equal((await installer.autoEnable()).ok, true);
   assert.equal(spawnSync("/bin/zsh", ["-f", "-n", f.target]).status, 0);
   const pathBin = path.join(f.home, "path-bin");
@@ -343,7 +421,7 @@ test("a missing feature file under a symlinked config parent is disabled", async
   fs.mkdirSync(destination);
   fs.symlinkSync(destination, link);
   const installer = createClaudeLauncherInstaller({ home: f.home, configRoot: f.configRoot,
-    featureFile: path.join(link, "features.json"), platform: "darwin", env: {} });
+    featureFile: path.join(link, "features.json"), platform: "darwin", env: {}, store: signedInStore });
   assert.equal(await installer.autoEnable(), null);
   assert.equal(fs.existsSync(f.target), false);
   assert.deepEqual(fs.readdirSync(destination), []);
@@ -359,7 +437,7 @@ test("new-file atomic publication refuses a file created after final validation"
     return target[name];
   } });
   const installer = createClaudeLauncherInstaller({ home: f.home, configRoot: f.configRoot,
-    featureFile: f.featureFile, platform: "darwin", env: {}, fsImpl });
+    featureFile: f.featureFile, platform: "darwin", env: {}, store: signedInStore, fsImpl });
   assert.equal((await installer.autoEnable()).ok, false);
   assert.equal(fs.readFileSync(f.target, "utf8"), "# last-moment new file\n");
   assert.equal(fs.readdirSync(f.home).some((file) => file.endsWith(".tmp")), false);

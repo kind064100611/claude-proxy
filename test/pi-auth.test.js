@@ -3,12 +3,61 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { loadPiAuth: loadStoredAuth } = require("../lib/pi-auth");
+const { loadPiAuth: loadStoredAuth, readCredentialAvailability } = require("../lib/pi-auth");
 const { createCredentialStore } = require("../lib/credential-store");
 const { requestResponses: requestStoredResponses, toResponsesBody, getPromptCacheKey } = require("../lib/openai-responses");
 let store;
 const loadPiAuth = (options) => loadStoredAuth({ ...options, store });
 const requestResponses = (body, options) => requestStoredResponses(body, { ...options, loadAuth: loadPiAuth });
+
+test("local credential availability validates structure without refreshing, migrating or writing", (t) => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("must not make network requests"));
+  const oauth = { type: "oauth", access: "access", refresh: "refresh", expires: 0 };
+  const api = { type: "api_key", key: "key" };
+  const cases = [
+    [{}, {}, false, false],
+    [{}, { OPENAI_API_KEY: " key " }, true, false],
+    [{}, { OPENAI_API_KEY: " \t" }, false, false],
+    [{}, { OPENAI_API_KEY: 123 }, false, false],
+    [{ "github-copilot": oauth }, {}, false, true],
+    [{ "github-copilot": api }, {}, false, false],
+    [{ openai: api }, {}, true, false],
+    [{ "openai-codex": api }, {}, true, false],
+    [{ openai: oauth, "github-copilot": oauth }, {}, true, true],
+    [{ "openai-codex": oauth }, {}, true, false],
+    // Legacy openai wins unless codex carries a loginVersion, even if the selected value is invalid.
+    [{ openai: api, "openai-codex": {} }, {}, true, false],
+    [{ openai: {}, "openai-codex": oauth }, {}, false, false],
+    [{ openai: api, "openai-codex": { loginVersion: "new" } }, {}, false, false],
+    [{ openai: {}, "openai-codex": { ...oauth, loginVersion: "new" } }, {}, true, false]
+  ];
+  for (const invalid of [null, {}, { ...api, key: " " }, { ...api, key: 1 },
+    { ...oauth, access: " " }, { ...oauth, refresh: "\t" }, { ...oauth, expires: "0" },
+    { ...oauth, expires: Infinity }, { ...oauth, expires: NaN }]) {
+    cases.push([{ openai: invalid, "github-copilot": invalid }, {}, false, false]);
+  }
+  for (const [auth, env, openai, copilot] of cases) {
+    let reads = 0;
+    const store = {
+      readAuth(options) { reads++; assert.deepEqual(options, { readOnly: true }); return auth; },
+      migrate() { assert.fail("must not migrate"); },
+      updateProvider() { assert.fail("must not write"); },
+      saveLogin() { assert.fail("must not save"); }
+    };
+    const before = JSON.stringify(auth);
+    assert.deepEqual(readCredentialAvailability({ env, store }), { openai, copilot });
+    assert.equal(reads, 1);
+    assert.equal(JSON.stringify(auth), before);
+  }
+});
+
+test("local credential availability propagates storage failures even with an environment key", () => {
+  const error = new Error("storage failure");
+  for (const env of [{}, { OPENAI_API_KEY: "key" }]) {
+    assert.throws(() => readCredentialAvailability({ env, store: { readAuth() { throw error; } } }),
+      (actual) => actual === error);
+  }
+});
 
 const jwt = (accountId) => `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } })).toString("base64url")}.signature`;
 

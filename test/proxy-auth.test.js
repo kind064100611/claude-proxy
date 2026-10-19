@@ -21,7 +21,7 @@ for (const platform of ["mac", "windows"]) {
     assert.doesNotMatch(source, /macosService\.configure\(/);
     assert.match(source, /projectMemory: projectMemoryInstaller/);
     assert.match(source, /projectMemoryInstaller\.autoEnable\(\)/);
-    assert.match(source, /const claudeLauncherInstaller = createClaudeLauncherInstaller\(\);/);
+    assert.match(source, /const claudeLauncherInstaller = createClaudeLauncherInstaller\(\{ store: credentialStore \}\);/);
     assert.ok(source.indexOf("claudeLauncherInstaller.autoEnable()") > source.indexOf("server.listen(PORT"));
     assert.equal(source.split("claudeLauncherInstaller.autoEnable()").length, 2);
     assert.match(source, /complete: summaryModel\.complete/);

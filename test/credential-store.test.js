@@ -123,6 +123,42 @@ test("provider updates preserve latest data and reject a stale refresh after sam
   assert.deepEqual(fs.readdirSync(store.directory).sort(), ["auth.json"]);
 });
 
+test("readOnly auth probes do not create a missing store", (t) => {
+  const { store } = fixture(t);
+  assert.deepEqual(store.readAuth({ readOnly: true }), {});
+  assert.equal(fs.existsSync(store.directory), false);
+});
+
+test("readOnly auth probes still reject a symlinked credential directory", (t) => {
+  const { root, store } = fixture(t);
+  const destination = path.join(root, "external-store");
+  fs.mkdirSync(destination);
+  fs.writeFileSync(path.join(destination, "auth.json"), JSON.stringify({ openai: credential }));
+  fs.symlinkSync(destination, store.directory, process.platform === "win32" ? "junction" : "dir");
+  assert.throws(() => store.readAuth({ readOnly: true }), /无法安全读取/);
+  assert.throws(() => store.readAuth(), /无法安全读取/);
+});
+
+test("readOnly auth probes preserve bytes and permissions, including on corrupt auth", (t) => {
+  const { store } = fixture(t);
+  fs.mkdirSync(store.directory);
+  for (const bytes of ["﻿" + JSON.stringify({ openai: credential }), "private malformed auth"]) {
+    fs.writeFileSync(store.authFile, bytes);
+    if (process.platform !== "win32") {
+      fs.chmodSync(store.directory, 0o755);
+      fs.chmodSync(store.authFile, 0o644);
+    }
+    if (bytes.startsWith("﻿")) assert.deepEqual(store.readAuth({ readOnly: true }), { openai: credential });
+    else assert.throws(() => store.readAuth({ readOnly: true }), /无法安全读取/);
+    assert.equal(fs.readFileSync(store.authFile, "utf8"), bytes);
+    assert.deepEqual(fs.readdirSync(store.directory), ["auth.json"]);
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(store.directory).mode & 0o777, 0o755);
+      assert.equal(fs.statSync(store.authFile).mode & 0o777, 0o644);
+    }
+  }
+});
+
 test("reads tighten existing private store permissions without changing external import permissions", { skip: process.platform === "win32" }, (t) => {
   const { root, store, migrate } = fixture(t);
   const external = path.join(root, "external.json");

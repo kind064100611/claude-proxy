@@ -22,12 +22,21 @@ async function runCli({ requestResponses, searchResponses = async () => { throw 
   const filename = path.resolve("mac/proxy.js");
   const nativeRequire = createRequire(filename);
   const urls = [];
+  const store = { directory: path.join(directory, "store"), migrate() {}, readAuth: () => ({}),
+    saveLogin() { throw new Error("unexpected credential write"); } };
+  const observations = nativeRequire("../lib/online-summary");
   let server;
   const context = {
     require: (name) => name === "http" ? { createServer: (handler) => {
       server = http.createServer((request, response) => { urls.push(request.url); handler(request, response); });
       return server;
-    } } : name === "../lib/openai-responses" ? { ...responses, requestResponses }
+    } } : name === "../lib/credential-store" ? { defaultStore: store }
+      : name === "../lib/claude-setup" ? { ...nativeRequire(name), getClaudeConfigRoot: () => directory,
+        createClaudeSetup: (options) => nativeRequire(name).createClaudeSetup({ ...options, configRoot: directory, store, env: {} }) }
+      : name === "../lib/online-summary" ? { ...observations,
+        createOnlineSummary: (options) => observations.createOnlineSummary({ ...options, configFile: path.join(directory, "features.json"), archiveRoot: path.join(directory, "observations") }),
+        createSummarySettings: (options) => observations.createSummarySettings({ ...options, configFile: path.join(directory, "features.json") }) }
+      : name === "../lib/openai-responses" ? { ...responses, requestResponses }
       : name === "../lib/web-search" ? { ...webSearch, runWebSearch: (body, search, options) => webSearch.runWebSearch(body, search, { ...options, requestResponsesImpl: searchResponses }) }
         : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [{ id: "gpt-5.4", owned_by: "openai" }] }) } : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) } : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) } : nativeRequire(name),
     __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL,
@@ -39,7 +48,8 @@ async function runCli({ requestResponses, searchResponses = async () => { throw 
   try {
     const env = {
       ...process.env,
-      CLAUDE_CONFIG_DIR: directory,
+      HOME: directory, USERPROFILE: directory, CLAUDE_CONFIG_DIR: directory,
+      OPENAI_API_KEY: "test-only-gpt-key",
       ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_API_KEY: "test-only", ANTHROPIC_AUTH_TOKEN: "test-only",
       ANTHROPIC_MODEL: "gpt-4.1",
@@ -249,7 +259,8 @@ test("launcher applies a fixed GPT window across GPT/Claude switching; compactio
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-switch-test-"));
     directories.push(directory);
     // A stale 1M gateway spelling in the environment still launches GPT at its catalog window.
-    const env = { ...process.env, CLAUDE_CONFIG_DIR: directory, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    const env = { ...process.env, HOME: directory, USERPROFILE: directory, CLAUDE_CONFIG_DIR: directory,
+      OPENAI_API_KEY: "test-only-gpt-key", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1" };
     for (const key of Object.keys(env)) {
       if (key === "CLAUDECODE" || key === "CLAUDE_CODE_MAX_CONTEXT_TOKENS" || key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_CODE_USE_")) delete env[key];

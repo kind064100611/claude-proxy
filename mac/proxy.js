@@ -955,7 +955,7 @@ async function answerWebSearch(anthropicBody, search, model, requestId, res) {
 
 const macosService = createMacosService({ proxyPath: __filename, port: PORT, onHandoff: shutdownProxy });
 const projectMemoryInstaller = createProjectMemoryInstaller({ configRoot: getClaudeConfigRoot() });
-const claudeLauncherInstaller = createClaudeLauncherInstaller();
+const claudeLauncherInstaller = createClaudeLauncherInstaller({ store: credentialStore });
 const claudeSetup = createClaudeSetup({ store: credentialStore, getAvailableModels });
 const authRouter = createAuthRouter({
   port: PORT,
