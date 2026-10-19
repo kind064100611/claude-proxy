@@ -297,6 +297,78 @@ for (const platform of ["mac", "windows"]) {
   });
 }
 
+test("Windows startup installs the real PowerShell launcher only after listen, once, respecting auth and explicit opt-out", async (t) => {
+  const installerModule = require(LAUNCHER_MODULE);
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proxy-startup-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  const profile = path.join(home, "Documents", "WindowsPowerShell", "profile.ps1");
+  fs.mkdirSync(path.dirname(profile), { recursive: true });
+  const original = "$env:KEEP = 'yes'\r\n";
+  fs.writeFileSync(profile, original);
+  const featureFile = path.join(root, "features.json");
+  fs.writeFileSync(featureFile, '{"version":1,"onlineSummary":false}\n');
+  const commands = [];
+  let pending;
+  const installerFactory = (options) => {
+    const installer = installerModule.createClaudeLauncherInstaller({ ...options, home,
+      configRoot: path.join(root, "config"), featureFile, env: { SystemRoot: path.join(root, "Windows") }, platform: "win32",
+      execFileSync(file, args) {
+        commands.push({ file, args });
+        if (file === process.execPath) {
+          assert.deepEqual(args, ["--version"]);
+          return process.version;
+        }
+        assert.equal(path.basename(file), "powershell.exe");
+        assert.deepEqual(args.slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
+        if (args[4].includes("$PROFILE.CurrentUserAllHosts")) return profile + "\r\n";
+        assert.match(args[4], /Language\.Parser\]::ParseFile/);
+        return "";
+      } });
+    return { ...installer, autoEnable: () => (pending = installer.autoEnable()) };
+  };
+  const auth = { openai: { type: "api_key", key: "test-startup-key" } };
+  const first = startProxy("windows", root, { installerFactory, auth, listen: "manual" });
+  await tick();
+  assert.equal(pending, undefined);
+  assert.equal(commands.length, 0);
+  assert.equal(fs.readFileSync(profile, "utf8"), original);
+  first.server.listenCallback();
+  assert.equal((await pending).ok, true);
+  assert.equal(first.calls.factoryArgs[0].store, first.store);
+  const installed = fs.readFileSync(profile);
+  assert.ok(installed.toString().startsWith(original));
+  assert.match(installed.toString(), /function global:claude \{/);
+  assert.match(installed.toString(), /claude-launch\.js'\) \+ \$args/);
+  const featureBytes = fs.readFileSync(featureFile);
+  const enabled = JSON.parse(featureBytes);
+  assert.equal(enabled.claudeLauncher, true);
+  assert.equal(enabled.onlineSummary, false);
+  const backups = path.join(root, "config", "claude-proxy", "powershell-backups");
+  const names = fs.readdirSync(backups);
+  assert.equal(names.length, 1);
+  assert.equal(fs.readFileSync(path.join(backups, names[0]), "utf8"), original);
+  startProxy("windows", root, { installerFactory, auth });
+  assert.equal((await pending).changed, false);
+  assert.deepEqual(fs.readFileSync(profile), installed);
+  assert.deepEqual(fs.readFileSync(featureFile), featureBytes);
+  assert.deepEqual(fs.readdirSync(backups), names);
+  const commandCount = commands.length;
+  startProxy("windows", root, { installerFactory });
+  assert.equal(await pending, null);
+  assert.equal(commands.length, commandCount);
+  assert.deepEqual(fs.readFileSync(profile), installed);
+  assert.deepEqual(fs.readFileSync(featureFile), featureBytes);
+  fs.writeFileSync(profile, original);
+  fs.writeFileSync(featureFile, '{"version":1,"claudeLauncher":false}\n');
+  startProxy("windows", root, { installerFactory, auth });
+  assert.equal(await pending, null);
+  assert.equal(commands.length, commandCount);
+  assert.equal(fs.readFileSync(profile, "utf8"), original);
+  assert.equal(fs.readFileSync(featureFile, "utf8"), '{"version":1,"claudeLauncher":false}\n');
+  assert.deepEqual(fs.readdirSync(backups), names);
+});
+
 test("real launcher installer in a temp home enables once, then leaves everything unchanged, and never overrides an explicit false", async (t) => {
   const installerModule = require(LAUNCHER_MODULE);
   if (!fs.existsSync("/bin/zsh")) return t.skip("zsh unavailable");
