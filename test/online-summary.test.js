@@ -541,7 +541,7 @@ test("cleanup keeps sessions that are still used, ignores invalid retention valu
   assert.equal(pack.cleanup(), 1);
 });
 
-test("claudeLauncher is tri-state, preserves other fields, and is off for malformed or unsafe configuration", (t) => {
+test("claudeLauncher is tri-state, preserves other fields, and is off for malformed configuration", (t) => {
   const { filename } = featureFixture(t);
   assert.equal(getStatus(filename).claudeLauncher, null);
   assert.throws(() => setFeatures({ claudeLauncher: "true" }, filename));
@@ -558,12 +558,75 @@ test("claudeLauncher is tri-state, preserves other fields, and is off for malfor
     fs.writeFileSync(filename, bytes);
     assert.equal(getStatus(filename).claudeLauncher, false);
   }
-  fs.rmSync(filename);
+});
+
+test("claudeLauncher is off for a real symlinked feature file", { skip: process.platform === "win32" }, (t) => {
+  const { filename } = featureFixture(t);
+  fs.mkdirSync(path.dirname(filename));
   const real = path.join(path.dirname(filename), "real.json");
-  fs.writeFileSync(real, '{"version":1,"claudeLauncher":true}');
+  const original = Buffer.from('{"version":1,"claudeLauncher":true}');
+  fs.writeFileSync(real, original);
   fs.symlinkSync(real, filename);
   assert.equal(getStatus(filename).claudeLauncher, false);
+  assert.throws(() => setFeatures({ claudeLauncher: false }, filename), /Unsafe feature configuration file/);
+  assert.deepEqual(fs.readFileSync(real), original);
 });
+
+for (const operation of ["getStatus", "setFeatures"]) {
+  test(`${operation} rejects a target reporting both file and symlink without opening, reading or writing`, (t) => {
+    const { filename } = featureFixture(t);
+    setFeatures({ onlineSummary: true, projectMemory: true, claudeLauncher: true }, filename);
+    const original = fs.readFileSync(filename);
+    const calls = [];
+    const fsImpl = new Proxy(fs, { get(target, name) {
+      if (name === "lstatSync") return (file, ...args) => {
+        const stat = target.lstatSync(file, ...args);
+        return file === filename ? Object.create(stat, {
+          isFile: { value: () => true }, isSymbolicLink: { value: () => true }
+        }) : stat;
+      };
+      if (/^(open|read|write)/.test(String(name)) && typeof target[name] === "function") return (...args) => {
+        calls.push(name);
+        return target[name](...args);
+      };
+      return target[name];
+    } });
+    const stat = fsImpl.lstatSync(filename);
+    assert.equal(stat.isFile(), true);
+    assert.equal(stat.isSymbolicLink(), true);
+    if (operation === "getStatus") {
+      assert.deepEqual(getStatus(filename, fsImpl), { onlineSummary: false, summaryModel: null, summaryThreshold: 8192,
+        summaryPrompt: null, archiveRetentionDays: 0, projectMemory: false, claudeLauncher: false });
+    } else {
+      assert.throws(() => setFeatures({ claudeLauncher: false }, filename, fsImpl), /Unsafe feature configuration file/);
+    }
+    assert.deepEqual(calls, []);
+    assert.deepEqual(fs.readFileSync(filename), original);
+  });
+}
+
+for (const existing of [false, true]) {
+  test(`Windows junction config parent rejects reads and writes with ${existing ? "existing" : "missing"} feature file`, {
+    skip: process.platform !== "win32"
+  }, (t) => {
+    const { home, filename } = featureFixture(t);
+    const outside = path.join(home, "outside-directory");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "sentinel.txt"), "must remain unchanged\n");
+    if (existing) fs.writeFileSync(path.join(outside, path.basename(filename)), '{"version":1,"claudeLauncher":true}');
+    const names = fs.readdirSync(outside).sort();
+    const bytes = names.map((name) => fs.readFileSync(path.join(outside, name)));
+    fs.symlinkSync(outside, path.dirname(filename), "junction");
+    assert.equal(fs.lstatSync(path.dirname(filename)).isSymbolicLink(), true);
+    const status = getStatus(filename);
+    assert.equal(status.onlineSummary, false);
+    assert.equal(status.projectMemory, false);
+    assert.equal(status.claudeLauncher, false);
+    assert.throws(() => setFeatures({ claudeLauncher: false }, filename), /Unsafe feature configuration directory/);
+    assert.deepEqual(fs.readdirSync(outside).sort(), names);
+    assert.deepEqual(names.map((name) => fs.readFileSync(path.join(outside, name))), bytes);
+  });
+}
 
 test("getStatus and setFeatures use an injected fs and reject other-owned files or parents", (t) => {
   const { filename } = featureFixture(t);

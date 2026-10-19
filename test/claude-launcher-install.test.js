@@ -18,6 +18,12 @@ function block(node, launcher, eol = "\n") {
     `  node_command="$(whence -p node)" || node_command=${quote(node)}`,
     `  "$node_command" ${quote(launcher)} "$@"`, "}", END].join(eol) + eol;
 }
+function testZsh(name, options, run) {
+  if (typeof options === "function") { run = options; options = {}; }
+  return test(name, { ...options, skip: process.platform === "win32"
+    ? "zsh filesystem/install/status tests require POSIX paths and permissions"
+    : options.skip }, run);
+}
 function fixture(t, options = {}) {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "launcher-install-")));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -33,7 +39,7 @@ function fixture(t, options = {}) {
   return { home, configRoot, featureFile, target, launcher, installer, backups };
 }
 
-test("first install preserves bytes and mode, creates private digest backup, and is idempotent", async (t) => {
+testZsh("first install preserves bytes and mode, creates private digest backup, and is idempotent", async (t) => {
   const f = fixture(t);
   const original = Buffer.from("# user config\r\nexport EXAMPLE=yes");
   fs.writeFileSync(f.target, original, { mode: 0o640 });
@@ -57,7 +63,7 @@ test("first install preserves bytes and mode, creates private digest backup, and
   assert.equal(f.backups().length, 1);
 });
 
-test("missing file is created privately without an invented backup", async (t) => {
+testZsh("missing file is created privately without an invented backup", async (t) => {
   const f = fixture(t);
   await f.installer.autoEnable();
   assert.equal(fs.statSync(f.target).mode & 0o777, 0o600);
@@ -65,7 +71,7 @@ test("missing file is created privately without an invented backup", async (t) =
   assert.equal(getStatus(f.featureFile).claudeLauncher, true);
 });
 
-test("exact manual block is adopted without touching zshrc or making backups", async (t) => {
+testZsh("exact manual block is adopted without touching zshrc or making backups", async (t) => {
   const f = fixture(t);
   const original = "# before\n" + block(process.execPath, f.launcher) + "# after\n";
   fs.writeFileSync(f.target, original);
@@ -76,7 +82,7 @@ test("exact manual block is adopted without touching zshrc or making backups", a
   assert.equal(f.backups().length, 0);
 });
 
-test("only exact stale templates are updated; disable keeps later user configuration", async (t) => {
+testZsh("only exact stale templates are updated; disable keeps later user configuration", async (t) => {
   const f = fixture(t);
   const before = "# before\n";
   const after = "export LATER=keep\n";
@@ -97,11 +103,29 @@ test("only exact stale templates are updated; disable keeps later user configura
   assert.equal(features.projectMemory, true);
 });
 
+test("zsh adapter preserves the original function template, quoting and byte offsets", () => {
+  const { createZshProfile } = require("../lib/claude-launcher-zsh");
+  const profile = createZshProfile({ home: "/home/test", env: {}, platform: "darwin", start: START, end: END,
+    execFileSync() { throw new Error("template checks must not execute a shell"); } });
+  for (const eol of ["\n", "\r\n"]) {
+    const node = "/node ' quoted";
+    const launcher = "/repo ' quoted/lib/claude-launch.js";
+    const rendered = profile.render(node, launcher, eol);
+    assert.equal(rendered + eol, block(node, launcher, eol));
+    assert.deepEqual(profile.parse(rendered, eol), { node, launcher });
+  }
+  const bytes = Buffer.from([35, 32, 255, 254, 10]);
+  const view = profile.decode(bytes);
+  assert.equal(view.offset(view.text.length), bytes.length);
+  assert.equal(view.encoding, "utf8");
+  assert.equal(profile.target(), path.join("/home/test", ".zshrc"));
+});
+
 test("unsupported platforms and shell configurations skip before touching any files or credentials", async () => {
   const fsImpl = new Proxy({}, { get() { throw new Error("must not access fs"); } });
   let credentialReads = 0;
   const store = { readAuth() { credentialReads++; throw new Error("must not read credentials"); } };
-  for (const options of [{ platform: "win32" }, { platform: "linux" },
+  for (const options of [{ platform: "linux" },
     { platform: "darwin", env: { SHELL: "/bin/bash" } },
     { platform: "darwin", env: { ZDOTDIR: "/custom/zsh" } }]) {
     const installer = createClaudeLauncherInstaller({ home: "/test/home", env: {}, fsImpl, store, ...options });
@@ -137,13 +161,13 @@ test("automatic installation without GPT credentials never accesses shell, featu
   }
 });
 
-test("OPENAI_API_KEY permits automatic installation without stored GPT credentials", async (t) => {
+testZsh("OPENAI_API_KEY permits automatic installation without stored GPT credentials", async (t) => {
   const f = fixture(t, { env: { OPENAI_API_KEY: "test-env-key" }, store: { readAuth: () => ({}) } });
   assert.equal((await f.installer.autoEnable()).ok, true);
   assert.equal(getStatus(f.featureFile).claudeLauncher, true);
 });
 
-test("automatic installation checks credentials only after earlier queued work finishes", async (t) => {
+testZsh("automatic installation checks credentials only after earlier queued work finishes", async (t) => {
   let auth = { openai: { type: "api_key", key: "test-key" } };
   let reads = 0;
   const f = fixture(t, { store: { readAuth() { reads++; return auth; } }, execFileSync(command, args) {
@@ -161,7 +185,7 @@ test("automatic installation checks credentials only after earlier queued work f
   assert.equal(fs.readFileSync(f.target, "utf8"), block(process.execPath, f.launcher));
 });
 
-test("logout preserves an installed launcher and feature state but does not prevent manual disable", async (t) => {
+testZsh("logout preserves an installed launcher and feature state but does not prevent manual disable", async (t) => {
   let auth = { openai: { type: "api_key", key: "test-key" } };
   let reads = 0;
   const f = fixture(t, { store: { readAuth() { reads++; return auth; } } });
@@ -212,7 +236,7 @@ test("factory construction never accesses the injected filesystem", () => {
   assert.doesNotThrow(() => createClaudeLauncherInstaller({ platform: "darwin", env: {}, fsImpl }));
 });
 
-test("maintenance commands enable/disable using only a temporary home and config root", (t) => {
+testZsh("maintenance commands enable/disable using only a temporary home and config root", (t) => {
   if (process.platform !== "darwin" || !fs.existsSync("/bin/zsh")) return t.skip("macOS + zsh required for maintenance commands");
   const f = fixture(t);
   const env = { ...process.env, HOME: f.home, CLAUDE_CONFIG_DIR: f.configRoot, SHELL: "/bin/zsh", ZDOTDIR: f.home };
@@ -227,7 +251,7 @@ test("maintenance commands enable/disable using only a temporary home and config
   }
 });
 
-test("construction is inert and status never writes or executes the shell", async (t) => {
+testZsh("construction is inert and status never writes or executes the shell", async (t) => {
   const f = fixture(t);
   const fsImpl = new Proxy(fs, { get(target, name) {
     if (/^(write|mkdir|chmod|rename|link|unlink)/.test(String(name))) return () => { throw new Error("write attempted"); };
@@ -240,7 +264,7 @@ test("construction is inert and status never writes or executes the shell", asyn
   assert.deepEqual(fs.readdirSync(f.home), []);
 });
 
-test("syntax failure and concurrent edits abort safely and clean temporary files", async (t) => {
+testZsh("syntax failure and concurrent edits abort safely and clean temporary files", async (t) => {
   for (const concurrent of [false, true]) {
     let f;
     f = fixture(t, { execFileSync(command, args) {
@@ -257,7 +281,7 @@ test("syntax failure and concurrent edits abort safely and clean temporary files
   }
 });
 
-test("a concurrent persistent opt-out is never reset by automatic installation", async (t) => {
+testZsh("a concurrent persistent opt-out is never reset by automatic installation", async (t) => {
   let f;
   f = fixture(t, { execFileSync(command, args) {
     if (args[0] === "--version") {
@@ -270,7 +294,7 @@ test("a concurrent persistent opt-out is never reset by automatic installation",
   assert.equal(fs.existsSync(f.target), false);
 });
 
-test("an existing syntax error is checked without executing user configuration", async (t) => {
+testZsh("an existing syntax error is checked without executing user configuration", async (t) => {
   if (!fs.existsSync("/bin/zsh")) return t.skip("zsh unavailable");
   const f = fixture(t);
   const marker = path.join(f.home, "must-not-run");
@@ -281,7 +305,7 @@ test("an existing syntax error is checked without executing user configuration",
   assert.equal(fs.existsSync(marker), false);
 });
 
-test("new-file publish cannot overwrite a concurrent new zshrc", async (t) => {
+testZsh("new-file publish cannot overwrite a concurrent new zshrc", async (t) => {
   let f;
   f = fixture(t, { execFileSync(command, args) {
     if (args[0] === "--version") return "v22.0.0";
@@ -291,7 +315,7 @@ test("new-file publish cannot overwrite a concurrent new zshrc", async (t) => {
   assert.equal(fs.readFileSync(f.target, "utf8"), "# created concurrently\n");
 });
 
-test("symlinks, directories, wrong ownership and unwritable files are preserved", async (t) => {
+testZsh("symlinks, directories, wrong ownership and unwritable files are preserved", async (t) => {
   for (const kind of ["symlink", "directory", "readonly", "owner"]) {
     const f = fixture(t);
     const original = path.join(f.home, "original");
@@ -315,7 +339,7 @@ test("symlinks, directories, wrong ownership and unwritable files are preserved"
   }
 });
 
-test("unsafe backup path and damaged feature configuration prevent modification", async (t) => {
+testZsh("unsafe backup path and damaged feature configuration prevent modification", async (t) => {
   for (const kind of ["backup-link", "backup-bytes", "damaged-feature"]) {
     const f = fixture(t);
     const original = "# original\n";
@@ -338,7 +362,7 @@ test("unsafe backup path and damaged feature configuration prevent modification"
   }
 });
 
-test("spaces and quotes are escaped, arguments survive, and Node fallback works in a fresh zsh", async (t) => {
+testZsh("spaces and quotes are escaped, arguments survive, and Node fallback works in a fresh zsh", async (t) => {
   if (!fs.existsSync("/bin/zsh")) return t.skip("zsh unavailable");
   const f = fixture(t);
   const repoRoot = path.join(f.home, "repo ' quoted");
@@ -364,7 +388,7 @@ test("spaces and quotes are escaped, arguments survive, and Node fallback works 
   assert.equal(fs.readFileSync(f.target, "utf8"), "");
 });
 
-test("installed zsh function passes --version through to the real official CLI", {
+testZsh("installed zsh function passes --version through to the real official CLI", {
   skip: process.env.RUN_CLAUDE_CLI_TESTS !== "1" || !fs.existsSync("/bin/zsh")
 }, async (t) => {
   const f = fixture(t);
@@ -379,7 +403,7 @@ test("installed zsh function passes --version through to the real official CLI",
   assert.equal(wrapped.stdout, direct.stdout);
 });
 
-test("digest backups are verified and reused across disable/enable cycles", async (t) => {
+testZsh("digest backups are verified and reused across disable/enable cycles", async (t) => {
   const f = fixture(t);
   fs.writeFileSync(f.target, "# unchanged original\n");
   await f.installer.autoEnable();
@@ -392,7 +416,7 @@ test("digest backups are verified and reused across disable/enable cycles", asyn
   assert.equal(fs.readFileSync(f.target, "utf8"), "# unchanged original\n");
 });
 
-test("no-final-newline and non-UTF-8 bytes outside a stale block remain unchanged", async (t) => {
+testZsh("no-final-newline and non-UTF-8 bytes outside a stale block remain unchanged", async (t) => {
   const f = fixture(t);
   const prefix = Buffer.from([35, 32, 255, 254, 13, 10]);
   const original = Buffer.concat([prefix, Buffer.from(block("/old/node", "/old/repo/lib/claude-launch.js").trimEnd())]);
@@ -403,7 +427,7 @@ test("no-final-newline and non-UTF-8 bytes outside a stale block remain unchange
   assert.deepEqual(fs.readFileSync(f.target), prefix);
 });
 
-test("disable repairs damaged feature JSON and persists opt-out even with a modified block", async (t) => {
+testZsh("disable repairs damaged feature JSON and persists opt-out even with a modified block", async (t) => {
   const f = fixture(t);
   const modified = block(process.execPath, f.launcher).replace("local node_command", "local changed");
   fs.writeFileSync(f.target, modified);
@@ -414,7 +438,7 @@ test("disable repairs damaged feature JSON and persists opt-out even with a modi
   assert.equal(fs.readFileSync(f.target, "utf8"), modified);
 });
 
-test("a missing feature file under a symlinked config parent is disabled", async (t) => {
+testZsh("a missing feature file under a symlinked config parent is disabled", async (t) => {
   const f = fixture(t);
   const link = path.join(f.home, "linked-config");
   const destination = path.join(f.home, "destination");
@@ -427,7 +451,7 @@ test("a missing feature file under a symlinked config parent is disabled", async
   assert.deepEqual(fs.readdirSync(destination), []);
 });
 
-test("new-file atomic publication refuses a file created after final validation", async (t) => {
+testZsh("new-file atomic publication refuses a file created after final validation", async (t) => {
   const f = fixture(t);
   const fsImpl = new Proxy(fs, { get(target, name) {
     if (name === "linkSync") return (from, to) => {
@@ -443,7 +467,7 @@ test("new-file atomic publication refuses a file created after final validation"
   assert.equal(fs.readdirSync(f.home).some((file) => file.endsWith(".tmp")), false);
 });
 
-test("invalid paths and failed Node probe never write shell configuration", async (t) => {
+testZsh("invalid paths and failed Node probe never write shell configuration", async (t) => {
   for (const options of [{ nodePath: "/bad\nnode" }, { repoRoot: "/bad\tpath" },
     { execFileSync() { throw new Error("no Node"); } }]) {
     const f = fixture(t, options);
@@ -464,7 +488,7 @@ for (const [name, content] of [
   ["duplicates", block("/node", "/repo/lib/claude-launch.js").repeat(2)],
   ["modified block", block("/node", "/repo/lib/claude-launch.js").replace('  local node_command', '  print modified')],
   ["outside definition", block("/node", "/repo/lib/claude-launch.js") + "alias claude=other\n"]
-]) test(`${name} conflict never overwrites user content`, async (t) => {
+]) testZsh(`${name} conflict never overwrites user content`, async (t) => {
   const f = fixture(t);
   fs.writeFileSync(f.target, content);
   const result = await f.installer.autoEnable();

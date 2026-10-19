@@ -100,7 +100,7 @@ Open `http://127.0.0.1:8082/login`. The launchers do not install services or mod
 
 The proxy listens only on `127.0.0.1:8082`. There is no environment variable for changing the port or enabling a remote listener. Do not start both platform proxies at once.
 
-After listening succeeds on **macOS + zsh**, the proxy automatically checks/installs the [capacity launcher function](#automatic-gpt-capacity-on-session-start-macos--zsh) in `~/.zshrc`. An identical existing block is adopted without rewriting the file or creating a backup. Windows and Linux skip this installation without reading shell or feature configuration files. Installation conflicts only warn; they do not stop the proxy. A failed port bind never triggers shell installation.
+After listening succeeds on **macOS + zsh or Windows PowerShell**, the proxy automatically checks/installs the [capacity launcher function](#automatic-gpt-capacity-on-session-start) in `~/.zshrc` or Windows PowerShell's `$PROFILE.CurrentUserAllHosts`. An identical existing block is adopted without rewriting the file or creating a backup. Linux skips this installation without reading shell or feature configuration files. Installation conflicts only warn; they do not stop the proxy. A failed port bind never triggers shell installation.
 
 ## Login and credentials
 
@@ -159,7 +159,7 @@ Importing a module does not create credential directories or migrate files. `CLA
 1. Keep the proxy running and configure at least one upstream authentication method first.
 2. On `/login`, wait until **Configure Claude CLI** is enabled, then click it.
 3. The proxy validates the CLI installation, credentials, settings structure, and authentication conflicts, then selects an available model from the dynamic catalog that matches the current credentials.
-4. **Open a new terminal** and run `claude`. Use `/model` in an interactive session to switch models. On macOS + zsh, proxy startup separately installs the [capacity entry point](#automatic-gpt-capacity-on-session-start-macos--zsh); the web configuration button does not manage it.
+4. **Open a new terminal** and run `claude`. Use `/model` in an interactive session to switch models. On macOS + zsh and Windows PowerShell, proxy startup separately installs the [capacity entry point](#automatic-gpt-capacity-on-session-start); the web configuration button does not manage it.
 
 The default settings file is `~/.claude/settings.json`. When `CLAUDE_CONFIG_DIR` is set, the proxy uses the actual `settings.json` in that directory, with support for `~` expansion. Model settings are cached by mtime and reread on later requests when the file changes.
 
@@ -211,7 +211,7 @@ GPT credentials may be saved OAuth credentials, a saved API key, or `OPENAI_API_
 
 Writes use the private exact-byte backups and serialized, conflict-checked atomic settings merge described above. Repeated startups with identical values do not rewrite settings or create another backup. Unrelated settings, the main session's `model` / `ANTHROPIC_MODEL`, and gateway routing fields are preserved: configuring the main session still requires the website button. Existing Claude processes do not reload their environment; start a new CLI session to use the defaults.
 
-### Automatic GPT capacity on session start (macOS + zsh)
+### Automatic GPT capacity on session start
 
 Claude Code 2.1.303's gateway discovery keeps model IDs, names, and descriptions, but does not use catalog capacity metadata to set GPT's session window. With local GPT credentials available, `lib/claude-launch.js` fetches `/v1/models` on **each session start** (3-second timeout, using the proxy's existing catalog cache) and passes `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the official CLI. It does not patch the official executable, require a pinned CLI version, or save a fixed capacity in global settings.
 
@@ -219,8 +219,8 @@ All three automatic GPT behaviors—subagent defaults sync, capacity launcher in
 
 There are three separate steps:
 
-1. **Proxy startup:** after successfully binding the port, check local GPT credentials before checking/installing the function in `~/.zshrc`. Write only when it is missing or an exact project template has stale Node/repository paths. An identical manually installed block is adopted without touching `.zshrc` or making a backup. Startup does not request or freeze capacity.
-2. **New terminal:** zsh loads the function. The proxy never sources user configuration, changes an existing terminal's environment, or updates an already-running Claude session.
+1. **Proxy startup:** after successfully binding the port, check local GPT credentials before checking/installing the function in the user's shell profile. Write only when it is missing or an exact project template has stale Node/repository paths. An identical manually installed block is adopted without touching the profile or making a backup. Startup does not request or freeze capacity.
+2. **New terminal:** zsh or Windows PowerShell loads the function. The proxy never sources user configuration, changes an existing terminal's environment, or updates an already-running Claude session.
 3. **Plain `claude` launch:** with local GPT credentials, the existing launcher fetches the current catalog and injects capacity only into that new CLI child process. Credentials are checked again after catalog parsing and CLI discovery; logout during either step restores the original arguments/environment and suppresses catalog-derived warnings. Node is resolved from PATH each time, with the installer's verified Node executable as fallback.
 
 The managed block looks like this (the installer fills in safely quoted absolute paths; no manual paste is required):
@@ -248,7 +248,7 @@ Capacity rules and boundaries:
 - Normal recognized Claude models continue using Claude Code's own context logic. No `DISABLE_COMPACT` or global forced `[1m]` marker is added.
 - Automatic refresh happens at **process startup**, not inside an existing session. If GPT capacities differ, ordinary launches use the shared minimum; explicitly starting a GPT can use its individual capacity. The existing difference warning remains: `/model` does not promise arbitrary, exact per-model window updates within one process.
 - A catalog declaration is **not a guarantee of the account's actual allowance**. If the proxy is unavailable or returns invalid catalog data, the launcher warns and starts the official CLI with the original arguments and context behavior; it does not invent a capacity.
-- This entry point covers this user's zsh terminal only. IDE/desktop launches and direct execution of the official binary bypass it. Windows/Linux entry points are unchanged. No background polling, PATH modification/shim, or replacement of `~/.local/bin/claude` is installed. After moving the repository or changing Node, start the proxy from the new installation (or run `--enable` below) to update only its recognized block.
+- This entry point covers this user's zsh or Windows PowerShell terminal only. IDE/desktop launches and direct execution of the official binary bypass it. Linux entry points are unchanged. No background polling, PATH modification/shim, or replacement of the official CLI is installed. After moving the repository or changing Node, start the proxy from the new installation (or run `--enable` below) to update only its recognized block.
 
 **Persistent disable / re-enable** (run from the repository root, with the same home and `CLAUDE_CONFIG_DIR` as the proxy):
 
@@ -585,7 +585,7 @@ Historical installer upgrade tests read original Git blobs at `f3fab02` and `530
 
 `claude-cli.test.js` is skipped by default. Set `RUN_CLAUDE_CLI_TESTS=1` only when explicitly choosing to run isolated checks with the locally installed CLI. It still uses mocked gateways and does not validate real account authorization or real upstream access.
 
-Validation is based on offline tests on macOS. Windows batch launchers and probe code have received static / mocked checks; successful execution on a real Windows installation or with real accounts has not been claimed.
+Windows PowerShell installation and wrapper execution are covered with temporary profiles: real PowerShell parsing, argument/standard-stream/exit-code preservation, Node fallback, backup/opt-out and isolated proxy-startup regressions. Optional installed-CLI tests use local mock upstreams. Real provider accounts and interactive terminal/profile-policy combinations are not covered by these tests; macOS execution tests still require zsh.
 
 ## License
 
