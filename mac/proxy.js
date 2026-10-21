@@ -597,7 +597,11 @@ function lengthWithoutTrailingPartial(text, marker) {
 // chunks into Anthropic SSE events, matching the Claude Code wire protocol.
 // message_start is sent by openAnthropicStream before this handler runs, so this
 // handler only emits content blocks plus the trailing message_delta/message_stop.
-function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes = 0) {
+function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes = 0, responseHandler = null) {
+  const writeEvent = async (name, data) => {
+    if (!responseHandler) return writeSseEvent(clientRes, name, data);
+    for (const event of responseHandler.event(data)) await writeSseEvent(clientRes, event.type, event);
+  };
   const THINK_OPEN = "<think>";
   const THINK_CLOSE = "</think>";
   // GPT reasoning arrives only as Responses summary events, so a literal
@@ -625,13 +629,13 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
       // Anthropic thinking blocks carry a signature before they close. Upstream
       // models can't produce a real one; emit a placeholder (the proxy strips
       // thinking blocks before sending back upstream, so it's never validated).
-      await writeSseEvent(clientRes, "content_block_delta", {
+      await writeEvent("content_block_delta", {
         type: "content_block_delta",
         index: index,
         delta: { type: "signature_delta", signature: "" }
       });
     }
-    await writeSseEvent(clientRes, "content_block_stop", {
+    await writeEvent("content_block_stop", {
       type: "content_block_stop",
       index: index
     });
@@ -642,7 +646,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
 
   const openTextBlock = async () => {
     await stopBlock();
-    await writeSseEvent(clientRes, "content_block_start", {
+    await writeEvent("content_block_start", {
       type: "content_block_start",
       index: index,
       content_block: { type: "text", text: "" }
@@ -652,7 +656,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
 
   const openThinkingBlock = async () => {
     await stopBlock();
-    await writeSseEvent(clientRes, "content_block_start", {
+    await writeEvent("content_block_start", {
       type: "content_block_start",
       index: index,
       content_block: { type: "thinking", thinking: "" }
@@ -662,7 +666,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
 
   const openToolBlock = async (oaiIndex, id, name) => {
     await stopBlock();
-    await writeSseEvent(clientRes, "content_block_start", {
+    await writeEvent("content_block_start", {
       type: "content_block_start",
       index: index,
       content_block: { type: "tool_use", id: id || `tool_${index}`, name: name || "", input: {} }
@@ -678,7 +682,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
     if (blockKind !== "text") {
       await openTextBlock();
     }
-    await writeSseEvent(clientRes, "content_block_delta", {
+    await writeEvent("content_block_delta", {
       type: "content_block_delta",
       index: index,
       delta: { type: "text_delta", text: text }
@@ -694,7 +698,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
     if (blockKind !== "thinking") {
       await openThinkingBlock();
     }
-    await writeSseEvent(clientRes, "content_block_delta", {
+    await writeEvent("content_block_delta", {
       type: "content_block_delta",
       index: index,
       delta: { type: "thinking_delta", thinking: text }
@@ -782,7 +786,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
         }
         const args = tc.function && tc.function.arguments;
         if (typeof args === "string" && args) {
-          await writeSseEvent(clientRes, "content_block_delta", {
+          await writeEvent("content_block_delta", {
             type: "content_block_delta",
             index: index,
             delta: { type: "input_json_delta", partial_json: args }
@@ -810,7 +814,7 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
     await flushContentBuffer();
     await stopBlock();
     const reported = usage || { prompt_tokens: 0, completion_tokens: 0 };
-    await writeSseEvent(clientRes, "message_delta", {
+    await writeEvent("message_delta", {
       type: "message_delta",
       delta: { stop_reason: mapOpenAIFinishReason(lastFinishReason), stop_sequence: null },
       usage: {
@@ -819,16 +823,16 @@ function createAnthropicStreamHandler(clientRes, model, requestId, requestBytes 
         ...(reported.cached_tokens !== undefined ? { cache_read_input_tokens: reported.cached_tokens } : {})
       }
     });
-    await writeSseEvent(clientRes, "message_stop", { type: "message_stop" });
+    await writeEvent("message_stop", { type: "message_stop" });
     await endWithBackpressure(clientRes);
   };
 
   return { applyOpenAiChunk, finish, sseChunks: () => sseChunks };
 }
 
-function requestResponsesStream(openaiBody, model, primaryModel, requestId, clientRes, upstreamControl) {
+function requestResponsesStream(openaiBody, model, primaryModel, requestId, clientRes, upstreamControl, responseHandler = null) {
   logEvent(requestId, "OpenAI Responses stream started", { model });
-  const handler = createAnthropicStreamHandler(clientRes, model, requestId);
+  const handler = createAnthropicStreamHandler(clientRes, model, requestId, 0, responseHandler);
   return requestResponses(openaiBody, {
     onChunk: handler.applyOpenAiChunk, control: upstreamControl,
     onCacheUsage: (usage) => logEvent(requestId, "OpenAI prompt cache usage", usage)
@@ -839,7 +843,7 @@ function requestResponsesStream(openaiBody, model, primaryModel, requestId, clie
     });
 }
 
-function streamToClient(openaiBody, model, primaryModel, requestId, clientRes) {
+function streamToClient(openaiBody, model, primaryModel, requestId, clientRes, responseHandler = null) {
   const upstreamControl = {};
   let completed = false;
   let clientClosed = false;
@@ -867,7 +871,7 @@ function streamToClient(openaiBody, model, primaryModel, requestId, clientRes) {
         return null;
       }
       stopKeepAlive = startSseKeepAlive(clientRes, requestId);
-      return requestResponsesStream(openaiBody, model, primaryModel, requestId, clientRes, upstreamControl);
+      return requestResponsesStream(openaiBody, model, primaryModel, requestId, clientRes, upstreamControl, responseHandler);
     })
     .then((result) => {
       completed = true;
@@ -1041,6 +1045,12 @@ const server = http.createServer(async (req, res) => {
           await sendLocalMessage(res, anthropicBody, memory.reply, bodyBytes, requestId);
           return;
         }
+        const responseHandler = !readOnly && onlineSummary.getStatus().projectMemory === true && anthropicBody.tools?.some((tool) => tool.name === "ProjectMemoryUpdate")
+          ? projectMemoryGateway.createResponseHandler({ enqueue: (input) => {
+            const accepted = projectMemoryMaintainer.enqueue(input).accepted === true;
+            logEvent(requestId, accepted ? "Project memory update queued at response" : "Project memory update not queued");
+            return accepted;
+          } }) : null;
         const isStream = anthropicBody.stream || false;
         const requestedModel = anthropicBody.model;
         const configuredModel = selectModel(requestedModel, getConfiguredModel(requestedModel));
@@ -1057,7 +1067,7 @@ const server = http.createServer(async (req, res) => {
           logEvent(requestId, "Copilot Claude request started", { model, stream: isStream });
           try {
             await forwardClaudeRequest(anthropicBody, req, res, {
-              onCacheUsage: (usage) => logEvent(requestId, "Copilot Claude prompt cache usage", usage)
+              onCacheUsage: (usage) => logEvent(requestId, "Copilot Claude prompt cache usage", usage), responseHandler
             });
           } catch (error) {
             if (!res.destroyed && !res.writableEnded) {
@@ -1080,7 +1090,7 @@ const server = http.createServer(async (req, res) => {
         openaiBody.reasoning = getResponsesReasoning(anthropicBody);
         if (isStream) {
           // Client wants streaming - bridge OpenAI Responses events to Anthropic SSE.
-          streamToClient(openaiBody, model, model, requestId, res);
+          streamToClient(openaiBody, model, model, requestId, res, responseHandler);
         } else {
           // Client wants non-streaming; collect a complete Responses result.
           openaiBody.stream = false;
@@ -1090,7 +1100,7 @@ const server = http.createServer(async (req, res) => {
           const anthropicResp = convertOpenAIToAnthropic(assembled, assembled.model || model);
           anthropicResp.id = assembled.id || anthropicResp.id;
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(anthropicResp));
+          res.end(JSON.stringify(responseHandler ? responseHandler.message(anthropicResp) : anthropicResp));
         }
       } catch (error) {
         if (!res.destroyed && !res.writableEnded) {

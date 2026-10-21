@@ -91,6 +91,89 @@ test("only a call in the last assistant message answered by the last user messag
   assert.deepEqual(createProjectMemoryGateway().prepare({ messages: [{ role: "user", content: [error("toolu_new")] }] }, { enabled: true }).triggers, []);
 });
 
+test("response messages consume memory calls before the client can dispatch them", () => {
+  const gateway = createProjectMemoryGateway();
+  const enqueued = [];
+  const handler = gateway.createResponseHandler({ enqueue: (input) => { enqueued.push(input); return true; } });
+  const answer = { type: "text", text: "Done." };
+  const usage = { input_tokens: 100, output_tokens: 20 };
+  const original = { type: "message", id: "msg_1", content: [answer, call("toolu_response")], stop_reason: "tool_use", usage };
+  const result = handler.message(original);
+  assert.equal(result.stop_reason, "end_turn");
+  assert.deepEqual(result.content, [answer, { type: "text", text: "\n\nQueued." }]);
+  assert.equal(result.usage, usage);
+  assert.equal(original.content[1].type, "tool_use");
+  handler.message(original);
+  assert.equal(enqueued.length, 1);
+  assert.deepEqual(gateway.prepare(conversation([answer, call("toolu_response")], [error("toolu_response")]), { enabled: true }).triggers, []);
+  const other = { type: "tool_use", id: "toolu_read", name: "Read", input: {} };
+  assert.equal(handler.message({ ...original, content: [other, call("toolu_second")] }).stop_reason, "tool_use");
+  const plain = { ...original, content: [answer, other] };
+  assert.equal(handler.message(plain), plain);
+});
+
+const memoryEvents = (id, json = JSON.stringify(call(id).input), stop = "tool_use") => [
+  { type: "content_block_start", index: 1, content_block: { ...call(id), input: {} } },
+  { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: json.slice(0, 9) } },
+  { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: json.slice(9) } },
+  { type: "content_block_stop", index: 1 },
+  { type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: 40 } },
+  { type: "message_stop" }
+];
+
+test("streamed memory input stays hidden until the complete response is accepted", () => {
+  const enqueued = [];
+  const handler = createProjectMemoryGateway().createResponseHandler({ enqueue: (input) => { enqueued.push(input); return true; } });
+  const events = memoryEvents("toolu_stream");
+  for (const value of events.slice(0, 4)) assert.deepEqual(handler.event(value), []);
+  assert.equal(enqueued.length, 0);
+  const usageOnly = { type: "message_delta", delta: {}, usage: { output_tokens: 30 } };
+  assert.deepEqual(handler.event(usageOnly), []);
+  assert.equal(enqueued.length, 0);
+  const result = handler.event(events[4]).filter((event) => event !== usageOnly);
+  assert.deepEqual(result.map((event) => event.type), ["content_block_start", "content_block_delta", "content_block_stop", "message_delta"]);
+  assert.equal(result[0].content_block.type, "text");
+  assert.equal(result[1].delta.text, "\n\nQueued.");
+  assert.equal(result[3].delta.stop_reason, "end_turn");
+  assert.equal(result[3].usage, events[4].usage);
+  assert.equal(enqueued.length, 1);
+  assert.deepEqual(handler.event(events[5]), [events[5]]);
+});
+
+test("memory filtering preserves real tools before and after the virtual call", () => {
+  for (const before of [true, false]) {
+    const handler = createProjectMemoryGateway().createResponseHandler({ enqueue: () => true });
+    const events = memoryEvents("toolu_mixed");
+    const other = { type: "content_block_start", index: before ? 0 : 2,
+      content_block: { type: "tool_use", id: "toolu_read", name: "Read", input: {} } };
+    const input = before ? [other, ...events] : [...events.slice(0, 4), other, ...events.slice(4)];
+    const result = input.flatMap((value) => handler.event(value));
+    assert.ok(result.includes(other));
+    assert.equal(result.find((value) => value.type === "message_delta").delta.stop_reason, "tool_use");
+  }
+});
+
+test("invalid, truncated, failed and refused memory calls never claim queue success", () => {
+  for (const [json, stop] of [["{", "tool_use"], ["null", "tool_use"], ["{}", "tool_use"], [JSON.stringify(call("x").input), "max_tokens"],
+    [JSON.stringify(call("x").input), "refusal"]]) {
+    let queued = 0;
+    const handler = createProjectMemoryGateway().createResponseHandler({ enqueue: () => { queued++; return true; } });
+    const result = memoryEvents("toolu_invalid", json, stop).flatMap((value) => handler.event(value));
+    assert.equal(queued, 0);
+    assert.match(result.find((value) => value.delta?.type === "text_delta").delta.text, /not queued/);
+    assert.ok(!result.some((value) => value.content_block?.type === "tool_use"));
+  }
+  for (const enqueue of [() => false, () => { throw new Error("unavailable"); }]) {
+    const handler = createProjectMemoryGateway().createResponseHandler({ enqueue });
+    assert.match(handler.message({ type: "message", content: [call("toolu_rejected")], stop_reason: "tool_use" }).content[0].text, /not queued/);
+  }
+  let queued = 0;
+  const handler = createProjectMemoryGateway().createResponseHandler({ enqueue: () => { queued++; return true; } });
+  for (const value of memoryEvents("toolu_incomplete").slice(0, 3)) handler.event(value);
+  assert.match(handler.finish()[1].delta.text, /not queued/);
+  assert.equal(queued, 0);
+});
+
 test("a local reply repeating the answer only for a written answer followed by our single call and its bare result", () => {
   const prepare = (last, reply, options = { enabled: true }) => createProjectMemoryGateway().prepare(conversation(last, reply), options);
   const answer = { type: "text", text: "Done." };

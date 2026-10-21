@@ -55,6 +55,19 @@ function maintainer(reply, options = {}) {
   return { ...instance, calls, events, warnings };
 }
 
+test("enqueue reports acceptance before background work and rejects invalid roots synchronously", async (t) => {
+  const root = repository(t);
+  fs.mkdirSync(path.join(root, "projectCodeMemory"));
+  const m = maintainer(null, { findPython: async () => null });
+  const rejected = m.enqueue({ root: path.join(root, "missing"), changed_paths: [] });
+  assert.equal(rejected.accepted, false);
+  assert.equal(await rejected, null);
+  const accepted = m.enqueue({ root, changed_paths: [] });
+  assert.equal(accepted.accepted, true);
+  assert.equal(await accepted, null);
+  assert.equal(m.calls.length, 0);
+});
+
 test("a stale record is refreshed under its id with gateway provenance and current fingerprints", async (t) => {
   if (!python) return t.skip("Python 3.9+ is required");
   const root = repository(t);

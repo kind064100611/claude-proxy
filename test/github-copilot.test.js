@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { PassThrough } = require("stream");
 const { forwardClaudeRequest, getCopilotHeaders, discoverCopilotModels, listCopilotResponsesModels, loadCopilotResponsesAuth } = require("../lib/github-copilot");
 const { prepareClaudeCache } = require("../lib/anthropic-cache");
+const { createProjectMemoryGateway, TOOL_NAME } = require("../lib/project-memory-gateway");
 
 const auth = { token: "copilot-test-token", baseUrl: "https://api.business.githubcopilot.com" };
 const loadAuth = async () => auth;
@@ -41,6 +42,31 @@ test("Copilot forwards native Anthropic SSE, tools, signatures and cache usage",
   assert.equal(response.text(), raw);
   assert.equal(response.headers["X-Accel-Buffering"], "no");
   assert.equal(response.headers["retry-after"], "2");
+});
+
+test("Copilot consumes gateway memory calls in both response formats without local dispatch", async () => {
+  for (const stream of [false, true]) {
+    const call = { type: "tool_use", id: "memory_1", name: TOOL_NAME, input: { root: "/repo", changed_paths: [] } };
+    const message = { type: "message", content: [{ type: "text", text: "Done." }, call], stop_reason: "tool_use" };
+    const events = [
+      { type: "content_block_start", index: 0, content_block: call },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" } },
+      { type: "message_stop" }
+    ];
+    let queued = 0;
+    const responseHandler = createProjectMemoryGateway().createResponseHandler({ enqueue: () => { queued++; return true; } });
+    const response = clientResponse();
+    await forwardClaudeRequest({ model: "claude-sonnet-5.5", stream, messages: [] }, { url: "/v1/messages", headers: {} }, response, {
+      loadAuth, responseHandler, fetchImpl: async () => new Response(stream
+        ? events.map((value) => `event: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`).join("") : JSON.stringify(message),
+      { headers: { "content-type": stream ? "text/event-stream" : "application/json" } })
+    });
+    assert.equal(queued, 1);
+    assert.ok(!response.text().includes(TOOL_NAME));
+    assert.ok(response.text().includes("Queued."));
+    if (!stream) assert.equal(JSON.parse(response.text()).stop_reason, "end_turn");
+  }
 });
 
 test("Copilot preserves HTTP/JSON errors and forwards token-count endpoint", async () => {

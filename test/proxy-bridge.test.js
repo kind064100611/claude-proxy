@@ -9,6 +9,85 @@ const { EventEmitter } = require("events");
 const responses = require("../lib/openai-responses");
 
 for (const platform of ["mac", "windows"]) {
+  test(`${platform} consumes GPT memory calls at the response boundary in JSON and SSE`, { timeout: 5000 }, async () => {
+    const filename = path.resolve(platform, "proxy.js");
+    const nativeRequire = createRequire(filename);
+    let route;
+    let requests = 0;
+    let mixed = false;
+    let accepted = true;
+    const enqueued = [];
+    const mockResponses = async (body, options) => {
+      const calls = [{ id: `memory_${requests++}`, function: { name: "ProjectMemoryUpdate", arguments: JSON.stringify({ root: "/repo", changed_paths: [] }) } }];
+      if (mixed) calls.push({ id: "read_1", function: { name: "Read", arguments: "{}" } });
+      const usage = { prompt_tokens: 100, completion_tokens: 20, cached_tokens: 50 };
+      if (!options.onChunk) return { model: body.model, content: "Done.", tool_calls: calls, finish_reason: "tool_calls", usage };
+      await options.onChunk({ choices: [{ delta: { content: "Done." } }] });
+      for (const [index, call] of calls.entries()) {
+        await options.onChunk({ choices: [{ delta: { tool_calls: [{ ...call, index, function: { ...call.function, arguments: call.function.arguments.slice(0, 7) } }] } }] });
+        await options.onChunk({ choices: [{ delta: { tool_calls: [{ index, function: { arguments: call.function.arguments.slice(7) } }] } }] });
+      }
+      await options.onChunk({ choices: [{ delta: {}, finish_reason: "tool_calls" }], usage });
+      return { streamed: true };
+    };
+    const context = {
+      require: (name) => name === "../lib/online-summary" ? { ...nativeRequire(name),
+        createOnlineSummary: () => ({ getStatus: () => ({ projectMemory: true }), prepare: async (body) => ({ body, stats: {} }), cleanup: () => 0 }) }
+        : name === "../lib/project-memory-maintainer" ? { createProjectMemoryMaintainer: () => ({ enqueue: (input) => {
+          enqueued.push(input); return Object.assign(Promise.resolve(null), { accepted });
+        } }) }
+        : name === "../lib/openai-responses" ? { ...responses, requestResponses: mockResponses }
+        : name === "../lib/model-discovery" ? { createModelDiscovery: () => async () => ({ object: "list", data: [] }) }
+        : name === "../lib/macos-service" ? { createMacosService: () => ({ getStatus: async () => ({ supported: false }) }) }
+        : name === "../lib/project-memory-install" ? { createProjectMemoryInstaller: () => ({ getStatus: async () => ({ state: "unavailable" }) }) }
+        : name === "http" ? { createServer: (handler) => { route = handler; return {}; } } : nativeRequire(name),
+      __filename: filename, __dirname: path.dirname(filename), process, Buffer, URL, console: { log() {}, warn() {}, error() {} },
+      setTimeout, clearTimeout, setInterval, clearInterval
+    };
+    vm.runInNewContext(fs.readFileSync(filename, "utf8").split("\nsyncClaudeSettings();")[0], context, { filename });
+    const send = async (stream) => {
+      const request = new EventEmitter();
+      Object.assign(request, { method: "POST", url: "/v1/messages", headers: {} });
+      const response = new EventEmitter();
+      let output = "";
+      Object.assign(response, { setHeader() {}, writeHead(status, headers) { response.status = status; response.headers = headers; },
+        write: (data) => { output += data; return true; } });
+      const done = new Promise((resolve) => { response.end = (data) => {
+        if (data) output += data;
+        response.writableEnded = response.writableFinished = true;
+        response.emit("finish"); resolve(output);
+      }; });
+      await route(request, response);
+      request.emit("data", Buffer.from(JSON.stringify({ model: "gpt-5.4", stream, tools: [{ name: "Edit", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "edit" }] })));
+      request.emit("end");
+      return done;
+    };
+    for (const stream of [false, true]) {
+      for (const hasOtherTool of [false, true]) {
+        mixed = hasOtherTool;
+        const raw = await send(stream);
+        assert.ok(!raw.includes("ProjectMemoryUpdate"));
+        assert.ok(raw.includes("Queued."));
+        assert.ok(raw.includes("Done."));
+        const value = stream ? raw.split("\n\n").filter((entry) => entry.startsWith("event:"))
+          .map((entry) => JSON.parse(entry.split("\ndata: ")[1])).find((entry) => entry.type === "message_delta") : JSON.parse(raw);
+        assert.equal(stream ? value.delta.stop_reason : value.stop_reason, mixed ? "tool_use" : "end_turn");
+        assert.equal(value.usage.cache_read_input_tokens, 50);
+      }
+      mixed = false;
+      accepted = false;
+      const failed = await send(stream);
+      assert.ok(failed.includes("not queued"));
+      assert.ok(!failed.includes("Queued."));
+      accepted = true;
+    }
+    assert.equal(enqueued.length, requests);
+    assert.equal(requests, 6);
+  });
+}
+
+for (const platform of ["mac", "windows"]) {
   test(`${platform} GPT bridge routes independently and reports cached tokens`, async () => {
     const filename = path.resolve(platform, "proxy.js");
     const nativeRequire = createRequire(filename);
